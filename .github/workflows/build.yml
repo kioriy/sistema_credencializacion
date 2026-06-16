@@ -1,0 +1,101 @@
+name: Build & Release Windows EXE
+
+# Disparadores:
+# - Al crear un tag v*.*.* (ej: v1.0.0) → crea un Release en GitHub
+# - Manual desde GitHub Actions → permite elegir si crear release o solo artefacto
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: "¿Crear un Release en GitHub?"
+        type: boolean
+        default: false
+
+jobs:
+  build-windows:
+    name: Build Windows EXE
+    runs-on: windows-latest
+
+    steps:
+      # ── 1. Obtener el código ──────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── 2. Configurar Python ─────────────────────────────────────────────
+      - name: Configurar Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      # ── 3. Instalar dependencias ─────────────────────────────────────────
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install `
+            "PySide6>=6.7" `
+            "SQLAlchemy>=2.0" `
+            "reportlab>=4.0" `
+            "thefuzz[speedup]" `
+            "requests>=2.31" `
+            "openpyxl>=3.1" `
+            "qrcode[pil]>=7.4" `
+            "Pillow>=10.0" `
+            "gspread>=6.0" `
+            "google-auth>=2.0" `
+            "qtawesome>=1.4.2" `
+            "pyinstaller>=6.0"
+
+      # ── 4. Compilar con PyInstaller ──────────────────────────────────────
+      - name: Compilar ejecutable
+        run: pyinstaller credencializacion.spec --clean --noconfirm
+
+      # ── 5. Comprimir la carpeta del ejecutable ───────────────────────────
+      - name: Comprimir ejecutable
+        run: |
+          cd dist
+          Compress-Archive -Path CredencializacionApp -DestinationPath CredencializacionApp-Windows.zip
+
+      # ── 6. Obtener versión del tag o fecha ───────────────────────────────
+      - name: Obtener versión
+        id: version
+        shell: bash
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          else
+            echo "version=dev-$(date +%Y%m%d-%H%M)" >> $GITHUB_OUTPUT
+          fi
+
+      # ── 7. Subir artefacto (siempre disponible en Actions) ───────────────
+      - name: Subir artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: CredencializacionApp-Windows-${{ steps.version.outputs.version }}
+          path: dist/CredencializacionApp-Windows.zip
+          retention-days: 30
+
+      # ── 8. Crear Release en GitHub (solo con tag o si se eligió manualmente)
+      - name: Crear GitHub Release
+        if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.create_release == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: "Credencialización ${{ steps.version.outputs.version }}"
+          draft: false
+          prerelease: false
+          files: dist/CredencializacionApp-Windows.zip
+          body: |
+            ## CredencializacionApp ${{ steps.version.outputs.version }}
+
+            ### Instalación
+            1. Descarga `CredencializacionApp-Windows.zip`
+            2. Extrae la carpeta completa
+            3. Ejecuta `CredencializacionApp.exe`
+
+            > La carpeta completa debe mantenerse junta — no muevas solo el `.exe`.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
