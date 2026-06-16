@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 # ── Configuración ─────────────────────────────────────────────────────────────
 # Reemplaza con tu usuario y nombre del repositorio de GitHub
-GITHUB_REPO = "TU_USUARIO/sistema-credencializacion"  # ← EDITA ESTO
+GITHUB_REPO = "kioriy/sistema_credencializacion"
 GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 ASSET_NAME = "CredencializacionApp-Windows.zip"
 
