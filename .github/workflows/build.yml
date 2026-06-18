@@ -19,6 +19,10 @@ jobs:
     name: Build Windows EXE
     runs-on: windows-latest
 
+    # ── Permisos necesarios para crear Releases en GitHub ────────────────────
+    permissions:
+      contents: write   # Requerido para crear y subir Releases
+
     steps:
       # ── 1. Obtener el código ──────────────────────────────────────────────
       - name: Checkout
