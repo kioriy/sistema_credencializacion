@@ -21,3 +21,8 @@ data/image_cache/
 
 # Plantillas base (no versionar imágenes)
 # plantilla_base/*.png  ← descomenta si quieres ignorarlas
+# Archivos de DB
+data/*.db
+data/*.db-shm
+data/*.db-wal
+data/image_cache/

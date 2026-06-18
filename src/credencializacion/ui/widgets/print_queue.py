@@ -56,11 +56,12 @@ class PrintQueueCard(QFrame):
 
     remove_requested = Signal(int)
 
-    def __init__(self, registro: "Registro", parent: QWidget | None = None) -> None:
+    def __init__(self, registro: "Registro", pixmap: QPixmap | None = None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._registro = registro
         self._registro_id = registro.id
         self._has_photo = bool(registro.photo_path)
+        self._pixmap = pixmap
         
         self.setObjectName("QueueCard")
         self.setFixedHeight(90)
@@ -92,9 +93,17 @@ class PrintQueueCard(QFrame):
             photo_layout = QVBoxLayout(photo_container)
             photo_layout.setContentsMargins(0, 0, 0, 0)
             photo_lbl = QLabel(photo_container)
-            photo_lbl.setPixmap(QPixmap(self._registro.photo_path).scaled(
-                50, 65, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation
-            ))
+            
+            if self._pixmap:
+                photo_lbl.setPixmap(self._pixmap.scaled(
+                    50, 65, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation
+                ))
+            else:
+                # Intento de cargar ruta local
+                photo_lbl.setPixmap(QPixmap(self._registro.photo_path).scaled(
+                    50, 65, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation
+                ))
+                
             photo_lbl.setFixedSize(50, 65)
             photo_layout.addWidget(photo_lbl)
         else:
@@ -189,8 +198,6 @@ class PrintQueueCard(QFrame):
 class PrintQueuePanel(QWidget):
     """Panel derecho principal para la cola de impresión."""
 
-    # Señal print_requested se elimina, ya que los botones vuelven al panel central.
-
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._queue: list["Registro"] = []
@@ -265,21 +272,19 @@ class PrintQueuePanel(QWidget):
         self._scroll_area.setWidget(self._cards_container)
         layout.addWidget(self._scroll_area, stretch=1)
 
-
-
         self._update_ui_state()
 
-    def add_to_queue(self, registro: "Registro") -> None:
-        """Agrega un registro a la cola."""
-        if any(r.id == registro.id for r in self._queue):
+    def add_to_queue(self, registro: "Registro", pixmap: QPixmap | None = None) -> None:
+        """Agrega un registro a la cola con su foto cacheada opcional."""
+        if any(item[0].id == registro.id for item in self._queue):
             return
 
-        self._queue.append(registro)
+        self._queue.append((registro, pixmap))
         self._render_queue()
 
     def remove_from_queue(self, registro_id: int) -> None:
         """Elimina un registro de la cola."""
-        self._queue = [r for r in self._queue if r.id != registro_id]
+        self._queue = [item for item in self._queue if item[0].id != registro_id]
         self._render_queue()
 
     def clear_queue(self) -> None:
@@ -289,7 +294,7 @@ class PrintQueuePanel(QWidget):
 
     def get_queue(self) -> list["Registro"]:
         """Devuelve la lista actual de registros en cola."""
-        return list(self._queue)
+        return [item[0] for item in self._queue]
 
     def _render_queue(self) -> None:
         """Vuelve a dibujar todas las tarjetas basado en la lista actual."""
@@ -298,17 +303,12 @@ class PrintQueuePanel(QWidget):
             if child.widget():
                 child.widget().deleteLater()
 
-        for registro in self._queue:
-            card = PrintQueueCard(registro)
+        for reg, pixmap in self._queue:
+            card = PrintQueueCard(reg, pixmap)
             card.remove_requested.connect(self.remove_from_queue)
             self._cards_layout.addWidget(card)
 
-        if not self._queue:
-            empty_lbl = QLabel("No hay registros en la cola")
-            empty_lbl.setStyleSheet(f"color: {TEXT_LIGHT}; font-style: italic;")
-            empty_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self._cards_layout.addWidget(empty_lbl)
-
+        self._cards_layout.addStretch()
         self._update_ui_state()
 
     def _update_ui_state(self) -> None:

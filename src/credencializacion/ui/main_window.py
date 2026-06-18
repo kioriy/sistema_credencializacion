@@ -26,6 +26,7 @@ from credencializacion.ui.styles import COLORS
 from credencializacion.ui.widgets.sidebar import Sidebar
 from credencializacion.ui.pages.control_panel import ControlPanel
 from credencializacion.ui.pages.template_editor import TemplateEditor
+from credencializacion.ui.pages.template_manager import TemplateManager
 from credencializacion.ui.pages.print_center import PrintCenter
 from credencializacion.ui.pages.config_panel import ConfigPanel
 
@@ -41,6 +42,7 @@ class MainWindow(QMainWindow):
     PAGE_TITLES: list[str] = [
         "Panel de Control",
         "Editor de Plantillas",
+        "Gestión Plantillas",
         "Centro de Impresión",
         "Configuración",
         "Soporte",
@@ -87,9 +89,12 @@ class MainWindow(QMainWindow):
         # Añadir páginas reales (ordenadas igual que el sidebar)
         self._control_panel = ControlPanel()
         self._template_editor = TemplateEditor()
+        self._template_manager = TemplateManager()
         self._stack.addWidget(self._control_panel)
         self._stack.addWidget(self._template_editor)
-        self._stack.addWidget(PrintCenter())
+        self._stack.addWidget(self._template_manager)
+        self._print_center = PrintCenter()
+        self._stack.addWidget(self._print_center)
         
         # Toolbar por sección (stacked)
         self._toolbar_stack = QStackedWidget()
@@ -97,9 +102,9 @@ class MainWindow(QMainWindow):
         self._create_toolbars()
         right_layout.addWidget(self._toolbar_stack)
         
-        # Configuración (Página 3) y Soporte (Placeholder 4)
+        # Configuración (Página 4) y Soporte (Placeholder 5)
         self._stack.addWidget(ConfigPanel())
-        self._stack.addWidget(self._create_placeholder_page(self.PAGE_TITLES[4], 4))
+        self._stack.addWidget(self._create_placeholder_page(self.PAGE_TITLES[5], 5))
         
         right_layout.addWidget(self._stack)
 
@@ -109,6 +114,7 @@ class MainWindow(QMainWindow):
         self.btn_print_front.clicked.connect(self._control_panel._on_print_front)
         self.btn_print_back.clicked.connect(self._control_panel._on_print_back)
         self.btn_preview.clicked.connect(self._control_panel._on_preview)
+        self.btn_add_queue.clicked.connect(self._control_panel._add_selected_to_queue)
         self.btn_sync.clicked.connect(self._control_panel._on_sync_api)
 
     # --------------------------------------------------------- toolbars
@@ -160,6 +166,10 @@ class MainWindow(QMainWindow):
         tb_layout.addWidget(self.btn_print_front)
         tb_layout.addWidget(self.btn_print_back)
         tb_layout.addWidget(self.btn_preview)
+
+        self.btn_add_queue = self._make_toolbar_btn("fa5s.plus-circle", "Agregar a Cola", primary=False)
+        tb_layout.addWidget(self.btn_add_queue)
+
         tb_layout.addWidget(self.btn_sync)
         tb_layout.addStretch()
         self._toolbar_stack.addWidget(tb_control)
@@ -168,11 +178,11 @@ class MainWindow(QMainWindow):
         tb_editor = self._make_toolbar_frame()
         tb_ed_layout = tb_editor.layout()
         
-        self.btn_editor_open = self._make_toolbar_btn("fa5s.folder-open", "Abrir", primary=False)
-        tb_ed_layout.addWidget(self.btn_editor_open)
-        
         self.btn_editor_save = self._make_toolbar_btn("fa5s.save", "Guardar", primary=True)
         tb_ed_layout.addWidget(self.btn_editor_save)
+
+        self.btn_editor_open = self._make_toolbar_btn("fa5s.folder-open", "Abrir", primary=False)
+        tb_ed_layout.addWidget(self.btn_editor_open)
         
         self.btn_editor_preview = self._make_toolbar_btn("fa5s.eye", "Vista Previa", primary=False)
         tb_ed_layout.addWidget(self.btn_editor_preview)
@@ -217,20 +227,38 @@ class MainWindow(QMainWindow):
         self.btn_editor_undo.clicked.connect(self._template_editor.undo)
         self.btn_editor_redo.clicked.connect(self._template_editor.redo)
 
-        # 2 — Centro de Impresión
+        # 2 — Gestión de Plantillas
+        tb_manager = self._make_toolbar_frame()
+        tb_mg_layout = tb_manager.layout()
+        self.btn_manager_refresh = self._make_toolbar_btn("fa5s.sync-alt", "Refrescar", primary=False)
+        tb_mg_layout.addWidget(self.btn_manager_refresh)
+        tb_mg_layout.addStretch()
+        self._toolbar_stack.addWidget(tb_manager)
+
+        # Conectar botón refrescar
+        self.btn_manager_refresh.clicked.connect(self._template_manager.refresh_clients)
+
+        # 3 — Centro de Impresión
         tb_print = self._make_toolbar_frame()
         tb_pr_layout = tb_print.layout()
-        tb_pr_layout.addWidget(self._make_toolbar_btn("fa5s.history", "Historial", primary=False))
+        self.btn_print_refresh = self._make_toolbar_btn("fa5s.sync-alt", "Actualizar Colas", primary=False)
+        self.btn_print_refresh.clicked.connect(self._print_center.refresh_queues)
+        tb_pr_layout.addWidget(self.btn_print_refresh)
         tb_pr_layout.addStretch()
         self._toolbar_stack.addWidget(tb_print)
 
-        # 3 — Configuración
+        # Conectar señal de cola creada → auto-refrescar Centro de Impresión
+        self._control_panel.add_to_queue_requested.connect(
+            self._print_center.refresh_queues
+        )
+
+        # 4 — Configuración
         tb_config = self._make_toolbar_frame()
         tb_config_layout = tb_config.layout()
         tb_config_layout.addStretch()
         self._toolbar_stack.addWidget(tb_config)
 
-        # 4 — Soporte
+        # 5 — Soporte
         tb_support = self._make_toolbar_frame()
         tb_support.layout().addStretch()
         self._toolbar_stack.addWidget(tb_support)
@@ -334,7 +362,7 @@ class MainWindow(QMainWindow):
         card_layout.setSpacing(12)
 
         # Ícono grande
-        icon_label = QLabel(["📊", "🎨", "🖨️", "⚙️", "🔧"][index])
+        icon_label = QLabel(["📊", "🎨", "📋", "🖨️", "⚙️", "🔧"][index])
         icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         icon_label.setStyleSheet("font-size: 48px;")
         card_layout.addWidget(icon_label)
@@ -374,3 +402,7 @@ class MainWindow(QMainWindow):
             self._stack.setCurrentIndex(index)
         if 0 <= index < self._toolbar_stack.count():
             self._toolbar_stack.setCurrentIndex(index)
+
+        # Auto-refrescar colas al navegar al Centro de Impresión (índice 3)
+        if index == 3:
+            self._print_center.refresh_queues()

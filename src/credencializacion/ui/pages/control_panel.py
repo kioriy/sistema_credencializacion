@@ -64,6 +64,7 @@ class ControlPanel(QWidget):
     print_front_requested = Signal(list)
     print_back_requested = Signal(list)
     preview_requested = Signal(list)
+    add_to_queue_requested = Signal()  # Emitted after successfully adding to queue
 
     # ── Constantes de paginación ───────────────────────────────────
     PAGE_SIZE = 25
@@ -78,6 +79,7 @@ class ControlPanel(QWidget):
         # Network manager para descargar fotos async
         self._net_manager = QNetworkAccessManager(self)
         self._photo_cache: dict[str, QPixmap] = {}  # url -> pixmap circular
+        self._raw_photo_cache: dict[str, QPixmap] = {} # url -> pixmap original
         self._pending_photos: dict[int, str] = {}  # reply_id -> url
         self._setup_ui()
         self._connect_signals()
@@ -153,8 +155,6 @@ class ControlPanel(QWidget):
 
         main_layout.addLayout(h_layout, stretch=1)
 
-        # layout.addWidget(self._card, stretch=3) # h_layout usage
-
     def _build_toolbar(self) -> QHBoxLayout:
         # Metodo sin uso (el título se pidió eliminar)
         return QHBoxLayout()
@@ -197,7 +197,17 @@ class ControlPanel(QWidget):
             }}
             QComboBox::drop-down {{
                 border: none;
+                width: 28px;
                 padding-right: 8px;
+            }}
+            QComboBox::down-arrow {{
+                image: none;
+                border-left: 5px solid transparent;
+                border-right: 5px solid transparent;
+                border-top: 5px solid {TEXT_LIGHT};
+                width: 0;
+                height: 0;
+                margin-right: 8px;
             }}
             QComboBox QAbstractItemView {{
                 background-color: {CARD_BG};
@@ -255,7 +265,7 @@ class ControlPanel(QWidget):
         row1.addWidget(self._combo_clients, stretch=1)
 
         self._search_input = QLineEdit()
-        self._search_input.setPlaceholderText("🔍 Buscar por nombre o ID...")
+        self._search_input.setPlaceholderText("🔍 Buscar por nombre, ID, grado+grupo (ej: 1A)...")
         self._search_input.setStyleSheet(f"""
             QLineEdit {{
                 background-color: {MAIN_BG};
@@ -275,6 +285,23 @@ class ControlPanel(QWidget):
             }}
         """)
         row1.addWidget(self._search_input, stretch=1)
+
+        # Etiqueta de resultados de filtro
+        self._lbl_filter_count = QLabel("")
+        self._lbl_filter_count.setStyleSheet(f"""
+            QLabel {{
+                background-color: #FEE2E2;
+                color: {PRIMARY};
+                border: 1px solid {PRIMARY};
+                border-radius: 12px;
+                padding: 4px 12px;
+                font-size: 11px;
+                font-weight: bold;
+                font-family: 'Inter', sans-serif;
+            }}
+        """)
+        self._lbl_filter_count.setVisible(False)
+        row1.addWidget(self._lbl_filter_count)
 
         # --- Fila 2: Plantilla + Impresora ---
         self._combo_templates = QComboBox()
@@ -457,6 +484,7 @@ class ControlPanel(QWidget):
         self._chk_select_all.toggled.connect(self._table.select_all)
         self._search_input.textChanged.connect(self._on_search_changed)
         self._combo_clients.currentIndexChanged.connect(self._on_client_selected)
+        self._table.add_to_queue_clicked.connect(self._add_single_to_queue)
 
     # ── Métodos públicos ───────────────────────────────────────────
 
@@ -467,8 +495,11 @@ class ControlPanel(QWidget):
             records: Lista completa de registros a mostrar.
         """
         self._all_records = records
+        self._filtered_records = None
+        self._active_status_filter = None
         self._total_records = len(records)
-        self._current_page = 0
+        self._current_page = 1
+        self._update_status_counters()
         self._refresh_page()
 
     def get_selected_records(self) -> list[int]:
@@ -512,43 +543,7 @@ class ControlPanel(QWidget):
         for name in printers:
             self._combo_printers.addItem(name)
 
-    # ── Paginación ─────────────────────────────────────────────────
 
-    def _refresh_page(self) -> None:
-        """Actualiza la tabla con los registros de la página actual."""
-        start = self._current_page * self.PAGE_SIZE
-        end = min(start + self.PAGE_SIZE, self._total_records)
-        page_records = self._all_records[start:end]
-
-        self._table.set_records(page_records)
-
-        # Actualizar label de conteo
-        if self._total_records > 0:
-            self._lbl_page_info.setText(
-                f"Mostrando {start + 1}-{end} de {self._total_records} registros"
-            )
-        else:
-            self._lbl_page_info.setText("Sin registros")
-
-        # Estado de botones de navegación
-        self._btn_prev.setEnabled(self._current_page > 0)
-        self._btn_next.setEnabled(end < self._total_records)
-
-    def _prev_page(self) -> None:
-        """Navega a la página anterior."""
-        if self._current_page > 1:
-            self._current_page -= 1
-            self._update_table()
-
-    def _next_page(self) -> None:
-        """Navega a la siguiente página."""
-        source = self._filtered_records if self._filtered_records is not None else self._all_records
-        if not source:
-            return
-        max_page = max(1, (len(source) - 1) // 25 + 1)
-        if self._current_page < max_page:
-            self._current_page += 1
-            self._update_table()
 
     # ── Helpers de UI ──────────────────────────────────────────────
 
@@ -607,22 +602,108 @@ class ControlPanel(QWidget):
     # ── Handlers de acciones ───────────────────────────────────────
 
     def _on_preview(self) -> None:
-        """Emite señal de vista previa con IDs seleccionados."""
-        ids = self.get_selected_records()
-        if ids:
-            self.preview_requested.emit(ids)
+        """Emite señal de vista previa con IDs en la cola de impresión."""
+        queue_records = self._queue_panel.get_queue()
+        if not queue_records:
+            self.set_status("⚠️ La cola de impresión está vacía", "warning")
+            return
+        self.preview_requested.emit([r.id for r in queue_records])
 
     def _on_print_front(self) -> None:
-        """Emite señal de impresión frontal con IDs seleccionados."""
-        ids = self.get_selected_records()
-        if ids:
-            self.print_front_requested.emit(ids)
+        """Emite señal de impresión frontal guardando la cola."""
+        self._save_queue_and_emit("front")
 
     def _on_print_back(self) -> None:
-        """Emite señal de impresión trasera con IDs seleccionados."""
-        ids = self.get_selected_records()
-        if ids:
-            self.print_back_requested.emit(ids)
+        """Emite señal de impresión trasera guardando la cola."""
+        self._save_queue_and_emit("back")
+
+    def _add_single_to_queue(self, reg_id: int) -> None:
+        """Agrega un único registro a la cola visual."""
+        template_id = self._combo_templates.currentData()
+        if not template_id:
+            self.set_status("⚠️ Selecciona una plantilla primero", "warning")
+            return
+
+        reg = next((r for r in self._all_records if r.id == reg_id), None)
+        if reg:
+            # Obtener foto del caché si existe
+            url = reg.photo_path
+            pixmap = self._raw_photo_cache.get(url) if url else None
+            self._queue_panel.add_to_queue(reg, pixmap)
+
+    def _add_selected_to_queue(self) -> None:
+        """Agrega los registros seleccionados a la cola visual."""
+        template_id = self._combo_templates.currentData()
+        if not template_id:
+            self.set_status("⚠️ Selecciona una plantilla primero", "warning")
+            return
+
+        selected_ids = self.get_selected_records()
+        if not selected_ids:
+            self.set_status("⚠️ Selecciona al menos un registro", "warning")
+            return
+
+        added = 0
+        for reg_id in selected_ids:
+            reg = next((r for r in self._all_records if r.id == reg_id), None)
+            if reg:
+                url = reg.photo_path
+                pixmap = self._raw_photo_cache.get(url) if url else None
+                self._queue_panel.add_to_queue(reg, pixmap)
+                added += 1
+
+        if added > 0:
+            self.set_status(f"✅ {added} registros agregados a la cola", "success")
+
+    def _save_queue_and_emit(self, mode: str) -> None:
+        """Guarda la cola visual en la BD y notifica al Centro de Impresión."""
+        queue_records = self._queue_panel.get_queue()
+        if not queue_records:
+            self.set_status("⚠️ La cola de impresión está vacía", "warning")
+            return
+
+        plantilla_id = self._combo_templates.currentData()
+        if not plantilla_id:
+            self.set_status("⚠️ Selecciona una plantilla", "warning")
+            return
+
+        # Crear en BD
+        from credencializacion.db.engine import DatabaseSession
+        from credencializacion.db.models import ColaImpresion, ItemCola
+
+        try:
+            with DatabaseSession() as session:
+                plantilla_nombre = self._combo_templates.currentText()
+                tipo = "Frentes" if mode == "front" else "Vueltas"
+                cola = ColaImpresion(
+                    nombre=f"{plantilla_nombre} — {len(queue_records)} {tipo}",
+                    total_registros=len(queue_records),
+                )
+                session.add(cola)
+                session.flush()
+
+                for orden, reg in enumerate(queue_records, start=1):
+                    item = ItemCola(
+                        cola_id=cola.id,
+                        registro_id=reg.id,
+                        plantilla_id=plantilla_id,
+                        orden=orden,
+                    )
+                    session.add(item)
+
+                session.commit()
+                self.set_status(f"✅ Cola de {tipo} guardada exitosamente", "success")
+                
+                self._queue_panel.clear_queue()
+                self.add_to_queue_requested.emit()
+
+                if mode == "front":
+                    self.print_front_requested.emit([r.id for r in queue_records])
+                else:
+                    self.print_back_requested.emit([r.id for r in queue_records])
+
+        except Exception as e:
+            self.set_status(f"❌ Error al guardar cola: {e}", "error")
 
     def _on_search_changed(self, text: str) -> None:
         """Filtra registros por texto de búsqueda en cualquier campo."""
@@ -639,7 +720,12 @@ class ControlPanel(QWidget):
         self._apply_filters()
 
     def _apply_filters(self) -> None:
-        """Aplica búsqueda de texto + filtro de estado combinados."""
+        """Aplica búsqueda de texto + filtro de estado combinados.
+
+        Soporta búsqueda compuesta grado+grupo: si el texto coincide con
+        un patrón como '1a', '3B', '2 A', filtra grado=1 AND grupo=A.
+        Si no coincide con el patrón, realiza búsqueda general.
+        """
         if not hasattr(self, '_all_records') or not self._all_records:
             return
 
@@ -648,34 +734,50 @@ class ControlPanel(QWidget):
         # Filtro de estado
         status = self._active_status_filter
         if status == "ready":
-            records = [r for r in records if r.get("estado_credencial") == "ready"]
+            records = [r for r in records if r.credential_status == "ready"]
         elif status == "no_photo":
-            records = [r for r in records if not r.get("photo_url")]
+            records = [r for r in records if not r.photo_path]
         elif status == "pending":
-            records = [r for r in records if r.get("estado_credencial") in ("pending", "", None)]
+            records = [r for r in records if r.credential_status in ("pending", "", None)]
 
         # Filtro de texto
         query = self._search_input.text().strip().lower()
         if query:
-            def matches(rec: dict) -> bool:
-                searchable = " ".join(
-                    str(v) for v in [
-                        rec.get("nombre", ""),
-                        rec.get("apellido", ""),
-                        rec.get("matricula", ""),
-                        rec.get("grado", ""),
-                        rec.get("grupo", ""),
-                        rec.get("turno", ""),
-                        rec.get("estado_credencial", ""),
-                        rec.get("enrollment_code", ""),
-                    ]
-                ).lower()
-                return query in searchable
-            records = [r for r in records if matches(r)]
+            # Intentar patrón compuesto grado+grupo (ej: "1a", "3B", "2 A")
+            import re
+            match = re.match(r'^(\d+)\s*([a-zA-Z])$', query.strip())
+            if match:
+                grado_q = match.group(1)
+                grupo_q = match.group(2).upper()
+                records = [
+                    r for r in records
+                    if str(r.get_dato("grado", "")).strip() == grado_q
+                    and str(r.get_dato("grupo", "")).strip().upper() == grupo_q
+                ]
+            else:
+                def matches(rec: "Registro") -> bool:
+                    searchable = " ".join(
+                        str(v) for v in [
+                            rec.nombre_completo,
+                            rec.enrollment_code,
+                            rec.get_dato("grado", ""),
+                            rec.get_dato("grupo", ""),
+                            rec.get_dato("turno", ""),
+                            rec.credential_status,
+                        ]
+                    ).lower()
+                    return query in searchable
+                records = [r for r in records if matches(r)]
 
-        self._filtered_records = records
+        if not self._active_status_filter and not query:
+            self._filtered_records = None
+            self._lbl_filter_count.setVisible(False)
+        else:
+            self._filtered_records = records
+            self._lbl_filter_count.setText(f"🔍 {len(records)} encontrados")
+            self._lbl_filter_count.setVisible(True)
         self._current_page = 1
-        self._update_table()
+        self._refresh_page()
 
     def _update_status_counters(self) -> None:
         """Actualiza las numeralias con los conteos de la data actual."""
@@ -687,9 +789,9 @@ class ControlPanel(QWidget):
             return
 
         total = len(self._all_records)
-        ready = sum(1 for r in self._all_records if r.get("estado_credencial") == "ready")
-        no_photo = sum(1 for r in self._all_records if not r.get("photo_url"))
-        pending = sum(1 for r in self._all_records if r.get("estado_credencial") in ("pending", "", None))
+        ready = sum(1 for r in self._all_records if r.credential_status == "ready")
+        no_photo = sum(1 for r in self._all_records if not r.photo_path)
+        pending = sum(1 for r in self._all_records if r.credential_status in ("pending", "", None))
 
         self._pill_all.setText(f"📋 Todos: {total}")
         self._pill_ready.setText(f"✅ Listos: {ready}")
@@ -712,6 +814,36 @@ class ControlPanel(QWidget):
             self._combo_printers.setCurrentIndex(-1)
         except ImportError:
             self._combo_printers.addItem("Módulo de impresión no disponible")
+
+    def _load_client_templates(self, cliente_id: int) -> None:
+        """Carga las plantillas del cliente seleccionado en el combo de plantillas.
+
+        Args:
+            cliente_id: ID del cliente en la BD local.
+        """
+        from credencializacion.db.engine import get_session
+        from credencializacion.db.models import Plantilla
+
+        self._combo_templates.clear()
+        self._combo_templates.addItem("Seleccionar plantilla...")
+
+        with get_session() as session:
+            plantillas = (
+                session.query(Plantilla)
+                .filter_by(cliente_id=cliente_id)
+                .order_by(Plantilla.nombre)
+                .all()
+            )
+            for p in plantillas:
+                self._combo_templates.addItem(
+                    f"{p.nombre} ({p.tipo})", p.id
+                )
+
+        if self._combo_templates.count() > 1:
+            self.set_status(
+                f"📋 {self._combo_templates.count() - 1} plantilla(s) disponible(s).",
+                "info",
+            )
 
     def set_status(self, message: str, level: str = "info") -> None:
         """Actualiza el footer de estado con un mensaje.
@@ -854,6 +986,7 @@ class ControlPanel(QWidget):
                             existing_reg.datos = rec_data
                             existing_reg.credential_status = rec_data.get("estado_credencial")
                             existing_reg.qr_data = rec_data.get("qr_data") or rec_data.get("photo_url", "")
+                            existing_reg.photo_path = rec_data.get("photo_url", "")
                         else:
                             nuevo_reg = Registro(
                                 cliente_id=local_cliente_id,
@@ -861,6 +994,7 @@ class ControlPanel(QWidget):
                                 enrollment_code=enrollment,
                                 credential_status=rec_data.get("estado_credencial"),
                                 qr_data=rec_data.get("qr_data") or rec_data.get("photo_url", ""),
+                                photo_path=rec_data.get("photo_url", ""),
                                 estado_impresion="pendiente",
                             )
                             session.add(nuevo_reg)
@@ -916,6 +1050,8 @@ class ControlPanel(QWidget):
         if school_id is None:
             self._table.setRowCount(0)
             self._lbl_page_info.setText("Mostrando 0 de 0 registros")
+            self._combo_templates.clear()
+            self._combo_templates.addItem("Plantillas")
             return
 
         school_name = self._combo_clients.currentText()
@@ -933,21 +1069,14 @@ class ControlPanel(QWidget):
                     .all()
                 )
                 if db_registros:
-                    # Convertir registros de BD a dicts para la tabla
-                    records = [r.datos for r in db_registros if r.datos]
-                    self._all_records = records
-                    self._filtered_records = None
-                    self._active_status_filter = None
-                    self._search_input.clear()
-                    self._current_page = 1
-                    self._update_status_counters()
-                    self._pill_all.setChecked(True)
-                    self._pill_ready.setChecked(False)
-                    self._pill_no_photo.setChecked(False)
-                    self._pill_pending.setChecked(False)
-                    self._update_table()
+                    # Desvincular de la sesión para poder usarlos en la UI después de cerrar la sesión
+                    session.expunge_all()
+                    
+                    # Usar el método oficial para cargar registros reales
+                    self.load_records(db_registros)
+                    self._load_client_templates(cliente.id)
                     self.set_status(
-                        f"✅ {len(records)} alumnos de {school_name} (datos locales).",
+                        f"✅ {len(db_registros)} alumnos de {school_name} (datos locales).",
                         "success",
                     )
                     return
@@ -962,19 +1091,42 @@ class ControlPanel(QWidget):
 
         try:
             adapter = MiEscuelaAdapter(base_url=BASE_URL, api_key=API_KEY)
-            records = adapter.fetch_records(school_id=school_id, status="all")
+            api_records = adapter.fetch_records(school_id=school_id, status="all")
 
-            self._all_records = records
-            self._filtered_records = None
-            self._active_status_filter = None
-            self._search_input.clear()
-            self._current_page = 1
-            self._update_status_counters()
-            self._pill_all.setChecked(True)
-            self._pill_ready.setChecked(False)
-            self._pill_no_photo.setChecked(False)
-            self._pill_pending.setChecked(False)
-            self._update_table()
+            # Guardar en BD para que tengan ID y puedan agregarse a la cola
+            from credencializacion.db.engine import DatabaseSession
+            from credencializacion.db.models import Registro, Cliente
+
+            with DatabaseSession() as session:
+                cliente = session.query(Cliente).filter_by(school_api_id=school_id).first()
+                if not cliente:
+                    cliente = Cliente(school_api_id=school_id, nombre=school_name)
+                    session.add(cliente)
+                    session.flush()
+
+                for rec in api_records:
+                    matricula = rec.get("matricula", "")
+                    reg = session.query(Registro).filter_by(
+                        cliente_id=cliente.id, 
+                        enrollment_code=matricula
+                    ).first()
+                    
+                    if not reg:
+                        reg = Registro(cliente_id=cliente.id, enrollment_code=matricula)
+                        session.add(reg)
+                    
+                    reg.datos = rec
+                    reg.credential_status = rec.get("estado_credencial", "pending")
+                    reg.photo_path = rec.get("photo_url", "")
+                
+                session.commit()
+                # Recuperar como modelos Registro reales
+                records = session.query(Registro).filter_by(cliente_id=cliente.id).all()
+                session.expunge_all()
+
+            # Usar el método oficial para cargar registros
+            self.load_records(records)
+            self._load_client_templates(cliente.id)
 
             self.set_status(
                 f"✅ {len(records)} alumnos cargados de {school_name}.",
@@ -985,108 +1137,81 @@ class ControlPanel(QWidget):
             self.set_status(f"❌ Error al cargar alumnos: {str(e)}", "error")
 
 
-
-    def _update_table(self) -> None:
-        """Actualiza la tabla con la página actual de los registros filtrados."""
-        # Determinar fuente de datos: filtrados o todos
+    def _refresh_page(self) -> None:
+        """Actualiza la tabla con los registros de la página actual."""
         source = self._filtered_records if self._filtered_records is not None else self._all_records
-
-        if not source:
-            self._table.setRowCount(0)
-            self._lbl_page_info.setText("Mostrando 0 de 0 registros")
-            return
-
-        from PySide6.QtGui import QPixmap, QIcon, QColor, QFont, QPainter, QPainterPath
-        from credencializacion.ui.widgets.record_table import (
-            StatusBadge, AddToQueueButton, STATUS_COLORS,
-            TEXT_DARK, TEXT_LIGHT, BORDER,
-        )
-
-        page_size = 25
-        total = len(source)
-        start = (self._current_page - 1) * page_size
-        end = min(start + page_size, total)
+        self._total_records = len(source)
+        start = (self._current_page - 1) * self.PAGE_SIZE
+        end = min(start + self.PAGE_SIZE, self._total_records)
         page_records = source[start:end]
 
-        self._table.setSortingEnabled(False)
-        self._table.setRowCount(len(page_records))
+        self._table.set_records(page_records)
 
-        for row, rec in enumerate(page_records):
-            # Col 0: FOTO — placeholder o cached
-            photo_url = rec.get("photo_url", "")
-            photo_item = QTableWidgetItem()
-            photo_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
-            photo_item.setData(Qt.ItemDataRole.UserRole, photo_url)
-
-            if photo_url and photo_url in self._photo_cache:
-                photo_item.setIcon(QIcon(self._photo_cache[photo_url]))
-            else:
-                # Placeholder circular gris
-                photo_item.setIcon(QIcon(self._make_placeholder(32)))
-            self._table.setItem(row, 0, photo_item)
-
-            # Col 1: ID
-            id_item = QTableWidgetItem(rec.get("matricula", ""))
-            id_item.setFont(QFont("Inter", 11))
-            id_item.setForeground(QColor(TEXT_LIGHT))
-            self._table.setItem(row, 1, id_item)
-
-            # Col 2: NOMBRE
-            nombre = f"{rec.get('nombre', '')} {rec.get('apellido', '')}".strip()
-            name_item = QTableWidgetItem(nombre or "Sin nombre")
-            name_item.setFont(QFont("Inter", 12, QFont.Weight.DemiBold))
-            name_item.setForeground(QColor(TEXT_DARK))
-            self._table.setItem(row, 2, name_item)
-
-            # Col 3: GRADO
-            grado_item = QTableWidgetItem(rec.get("grado", ""))
-            grado_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            grado_item.setFont(QFont("Inter", 11))
-            self._table.setItem(row, 3, grado_item)
-
-            # Col 4: GRUPO
-            grupo_item = QTableWidgetItem(rec.get("grupo", ""))
-            grupo_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            grupo_item.setFont(QFont("Inter", 11))
-            self._table.setItem(row, 4, grupo_item)
-
-            # Col 5: ESTADO (badge)
-            estado = rec.get("estado_credencial", "pending")
-            bg, fg = STATUS_COLORS.get(estado, (TEXT_LIGHT, "#FFFFFF"))
-            labels = {
-                "pending": "⏳ Pendiente",
-                "ready": "✅ Listo",
-                "delivered": "📦 Entregado",
-                "replacement_requested": "🔄 Renovación",
-            }
-            badge = StatusBadge(labels.get(estado, estado.capitalize()), bg, fg)
-            self._table.setCellWidget(row, 5, badge)
-
-            # Col 6: ACCIÓN
-            btn_queue = AddToQueueButton(rec.get("matricula", row))
-            self._table.setCellWidget(row, 6, btn_queue)
-
-            self._table.setRowHeight(row, 52)
-
-        self._table.setSortingEnabled(True)
-
-        # Info de paginación
-        total_all = len(self._all_records) if self._all_records else 0
-        if self._filtered_records is not None:
+        # Actualizar label de conteo
+        if self._total_records > 0:
             self._lbl_page_info.setText(
-                f"Mostrando {start+1}-{end} de {total} registros (filtrado de {total_all})"
+                f"Mostrando {start + 1}-{end} de {self._total_records} registros"
             )
         else:
-            self._lbl_page_info.setText(
-                f"Mostrando {start+1}-{end} de {total} registros"
-            )
+            self._lbl_page_info.setText("Sin registros")
 
-        # Estado de botones de paginación
+        # Estado de botones de navegación
         self._btn_prev.setEnabled(self._current_page > 1)
-        self._btn_next.setEnabled(end < total)
+        self._btn_next.setEnabled(end < self._total_records)
 
-        # Lanzar descarga de fotos para las filas visibles
+        # Iniciar descarga de fotos asíncrona
         self._download_visible_photos(page_records)
+
+    def _prev_page(self) -> None:
+        """Navega a la página anterior."""
+        if self._current_page > 1:
+            self._current_page -= 1
+            self._refresh_page()
+
+    def _next_page(self) -> None:
+        """Navega a la siguiente página."""
+        max_page = max(1, (self._total_records - 1) // self.PAGE_SIZE + 1)
+        if self._current_page < max_page:
+            self._current_page += 1
+            self._refresh_page()
+
+    def _filter_records(self, text: str) -> None:
+        """Filtra registros y vuelve a la página 1."""
+        text = text.lower().strip()
+        if not text and not self._active_status_filter:
+            self._filtered_records = None
+            self._total_records = len(self._all_records)
+        else:
+            self._filtered_records = []
+            for rec in self._all_records:
+                match_text = True
+                if text:
+                    # Validar matrícula, nombre, grado o grupo
+                    searchable = f"{rec.enrollment_code} {rec.nombre_completo} {rec.get_dato('grado', '')} {rec.get_dato('grupo', '')}".lower()
+                    match_text = text in searchable
+                
+                match_status = True
+                if self._active_status_filter:
+                    estado = rec.credential_status or "pending"
+                    if not rec.photo_path and self._active_status_filter == "no_photo":
+                        pass
+                    elif self._active_status_filter == "no_photo":
+                        match_status = False
+                    else:
+                        match_status = (estado == self._active_status_filter)
+
+                if match_text and match_status:
+                    self._filtered_records.append(rec)
+            
+            self._total_records = len(self._filtered_records)
+
+        self._current_page = 1
+        self._refresh_page()
+
+    def _filter_by_status(self, status: str | None) -> None:
+        """Filtra los registros por estado de credencial (pills)."""
+        self._active_status_filter = status
+        self._filter_records(self._search_input.text())
 
     # ── Descarga async de fotos ────────────────────────────────────
 
@@ -1131,24 +1256,31 @@ class ControlPanel(QWidget):
         painter.end()
         return result
 
-    def _download_visible_photos(self, page_records: list[dict]) -> None:
-        """Inicia descarga async de fotos de la página visible."""
+    def _download_visible_photos(self, page_records: list["Registro"]) -> None:
+        """Inicia descarga async de fotos de la página visible o aplica las cacheadas."""
         for row, rec in enumerate(page_records):
-            url = rec.get("photo_url", "")
-            if not url or url in self._photo_cache:
+            url = rec.photo_path
+            if not url or not url.startswith("http"):
+                # Si ya es un path local, RecordTable ya lo maneja
+                continue
+
+            if url in self._photo_cache:
+                # Aplicar foto desde la caché usando ID real
+                self._table.set_photo_by_id(rec.id, self._photo_cache[url])
                 continue
 
             request = QNetworkRequest(QUrl(url))
             reply = self._net_manager.get(request)
-            # Guardar fila y url en el reply para el callback
             reply.setProperty("row", row)
             reply.setProperty("photo_url", url)
+            reply.setProperty("reg_id", rec.id)
             reply.finished.connect(lambda r=reply: self._on_photo_downloaded(r))
 
     def _on_photo_downloaded(self, reply: "QNetworkReply") -> None:
         """Callback cuando una foto termina de descargarse."""
         row = reply.property("row")
         url = reply.property("photo_url")
+        reg_id = reply.property("reg_id")
 
         if reply.error() == QNetworkReply.NetworkError.NoError:
             data = reply.readAll()
@@ -1156,14 +1288,12 @@ class ControlPanel(QWidget):
             pixmap.loadFromData(data.data())
 
             if not pixmap.isNull():
+                self._raw_photo_cache[url] = pixmap
                 circular = self._make_circular(pixmap, 32)
                 self._photo_cache[url] = circular
 
-                # Actualizar el ícono en la tabla si la fila aún es visible
-                if row < self._table.rowCount():
-                    item = self._table.item(row, 0)
-                    if item and item.data(Qt.ItemDataRole.UserRole) == url:
-                        item.setIcon(QIcon(circular))
+                # Actualizar el ícono en la tabla usando el ID (por si se reordenó)
+                self._table.set_photo_by_id(reg_id, circular)
 
         reply.deleteLater()
 

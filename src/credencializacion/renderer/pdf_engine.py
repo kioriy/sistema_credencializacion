@@ -156,6 +156,108 @@ class PDFEngine:
         logger.info("PDF generado: %s (%d registros)", output_path, len(registros))
         return output_path
 
+    def render_both(
+        self,
+        registros: list["Registro"],
+        output_path: Path,
+    ) -> Path:
+        """Genera un PDF de 2 páginas: frentes en pág.1, vueltas en pág.2.
+
+        Página 1: frente del registro 1 en slot 1, frente del registro 2 en slot 2.
+        Página 2: vuelta del registro 1 en slot 1, vuelta del registro 2 en slot 2.
+
+        Args:
+            registros: Lista de hasta 2 registros a imprimir.
+            output_path: Ruta donde se guardará el PDF.
+
+        Returns:
+            La ruta al PDF generado.
+        """
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        c = Canvas(str(output_path), pagesize=self._page_size)
+        recursos = self.plantilla.recursos or {}
+
+        # Página 1: frentes
+        self._current_cara = "frente"
+        self._current_base_img = recursos.get("fondo_frente", "")
+        elems_frente = self.plantilla.elementos_frente
+        for slot_idx, registro in enumerate(registros):
+            if slot_idx >= len(self._card_positions):
+                break
+            self._render_card(c, registro, elems_frente, self._card_positions[slot_idx])
+        c.showPage()
+
+        # Página 2: vueltas
+        self._current_cara = "vuelta"
+        self._current_base_img = recursos.get("fondo_vuelta", "")
+        elems_vuelta = self.plantilla.elementos_vuelta
+        for slot_idx, registro in enumerate(registros):
+            if slot_idx >= len(self._card_positions):
+                break
+            self._render_card(c, registro, elems_vuelta, self._card_positions[slot_idx])
+        c.showPage()
+
+        c.save()
+        logger.info(
+            "PDF dual generado: %s (%d registros, frente+vuelta)",
+            output_path, len(registros),
+        )
+        return output_path
+
+    def render_queue(
+        self,
+        items: list[tuple["Registro", "Plantilla"]],
+        cara: str,
+        output_path: Path,
+    ) -> Path:
+        """Genera PDF de una cola de impresión (solo frentes o solo vueltas).
+
+        Agrupa ítems en pares (2 por página). Si el último grupo tiene
+        solo 1 registro, la segunda posición queda vacía.
+        El orden de los ítems se respeta para que frentes y vueltas
+        coincidan al dar vuelta la hoja.
+
+        Args:
+            items: Lista de tuplas (registro, plantilla) en orden.
+            cara: 'frente' o 'vuelta'.
+            output_path: Ruta donde se guardará el PDF.
+
+        Returns:
+            La ruta al PDF generado.
+        """
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        c = Canvas(str(output_path), pagesize=self._page_size)
+
+        for page_idx in range(0, len(items), self._cards_per_page):
+            page_items = items[page_idx : page_idx + self._cards_per_page]
+
+            for slot_idx, (registro, plantilla) in enumerate(page_items):
+                if slot_idx >= len(self._card_positions):
+                    break
+
+                # Configurar elementos y fondo para esta plantilla
+                elementos = (
+                    plantilla.elementos_frente
+                    if cara == "frente"
+                    else plantilla.elementos_vuelta
+                )
+                recursos = plantilla.recursos or {}
+                base_key = "fondo_frente" if cara == "frente" else "fondo_vuelta"
+                self._current_base_img = recursos.get(base_key, "")
+                self._current_cara = cara
+
+                base_pos = self._card_positions[slot_idx]
+                self._render_card(c, registro, elementos, base_pos)
+
+            c.showPage()
+
+        c.save()
+        logger.info(
+            "PDF cola generado (%s): %s (%d registros)",
+            cara, output_path, len(items),
+        )
+        return output_path
+
 
     def _render_card(
         self,
@@ -315,9 +417,24 @@ class PDFEngine:
         font_name = props.get("font_family", "Helvetica")
         font_size = props.get("font_size", 12)
         font_weight = props.get("font_weight", "normal")
+        font_italic = props.get("font_italic", False)
 
-        # Intentar registrar fuente custom
+        # Determinar variante (Bold, Italic, BoldItalic)
+        is_bold = font_weight == "bold"
+        if is_bold and font_italic:
+            variant_suffix = "-BoldOblique"
+        elif is_bold:
+            variant_suffix = "-Bold"
+        elif font_italic:
+            variant_suffix = "-Oblique"
+        else:
+            variant_suffix = ""
+
+        # Intentar registrar fuente custom; fallback a Helvetica con variante
         registered_name = _register_font(font_name)
+        if registered_name == "Helvetica" and variant_suffix:
+            registered_name = f"Helvetica{variant_suffix}"
+
         canvas.setFont(registered_name, font_size)
 
         # Color del texto
@@ -348,21 +465,38 @@ class PDFEngine:
     ) -> None:
         """Dibuja una imagen (foto del registro o recurso estático)."""
         campo = elem.get("campo_dato", "")
-        img_path = None
+        img_path: str | None = None
 
-        # Prioridad: foto cacheada localmente
+        # 1. Foto cacheada localmente en la BD
         if registro.photo_path and Path(str(registro.photo_path)).exists():
-            img_path = registro.photo_path
-        # Fallback: intentar usar URL del campo (si el campo es photo_url o similar)
-        elif campo in ("photo_url", "photo_path", "foto"):
-            url_or_path = registro.get_dato(campo, "") or registro.get_dato("photo_url", "")
-            if url_or_path and Path(str(url_or_path)).exists():
-                img_path = url_or_path
-        # También buscar en props si hay src estático
+            img_path = str(registro.photo_path)
+
+        # 2. Campo dinámico del registro (puede ser ruta local o URL HTTP)
+        if not img_path:
+            candidates = [campo] if campo else []
+            for key in candidates + ["photo_url", "photo_path", "foto", "url_foto"]:
+                val = registro.get_dato(key, "")
+                if not val:
+                    continue
+                val_str = str(val)
+                # Ruta local
+                if Path(val_str).exists():
+                    img_path = val_str
+                    break
+                # URL HTTP — descargar y cachear
+                if val_str.startswith(("http://", "https://")):
+                    cached = self._download_image(val_str)
+                    if cached:
+                        img_path = cached
+                        break
+
+        # 3. Src estático en props
         if not img_path:
             src = props.get("src", "")
             if src and Path(str(src)).exists():
                 img_path = src
+            elif src and str(src).startswith(("http://", "https://")):
+                img_path = self._download_image(src)
 
         if img_path:
             try:
@@ -372,7 +506,6 @@ class PDFEngine:
                 )
             except Exception as e:
                 logger.warning("Error al dibujar imagen '%s': %s", img_path, e)
-                # Dibujar placeholder si falla
                 canvas.setFillColorRGB(0.9, 0.9, 0.9)
                 canvas.rect(x, y, w, h, fill=1, stroke=0)
         else:
@@ -381,10 +514,51 @@ class PDFEngine:
             canvas.setStrokeColorRGB(0.78, 0.83, 0.9)
             canvas.setLineWidth(0.5)
             canvas.rect(x, y, w, h, fill=1, stroke=1)
-            # Icono de cámara centrado (texto)
             canvas.setFillColorRGB(0.6, 0.65, 0.75)
             canvas.setFont("Helvetica", min(8, h * 0.25))
             canvas.drawCentredString(x + w / 2, y + h / 2 - 2, "[ FOTO ]")
+
+    def _download_image(self, url: str) -> str | None:
+        """Descarga una imagen desde URL y la guarda en caché temporal.
+
+        Args:
+            url: URL HTTP/HTTPS de la imagen.
+
+        Returns:
+            Ruta local del archivo descargado, o None si falla.
+        """
+        import tempfile, urllib.request, urllib.error
+
+        # Clave de caché simple por URL
+        if not hasattr(self, "_img_cache"):
+            self._img_cache: dict[str, str] = {}
+        if url in self._img_cache:
+            cached = self._img_cache[url]
+            return cached if Path(cached).exists() else None
+
+        try:
+            # Detectar extensión de la URL
+            ext = ".jpg"
+            for candidate in (".png", ".jpg", ".jpeg", ".gif", ".webp"):
+                if candidate in url.lower():
+                    ext = candidate
+                    break
+
+            fd, tmp_path = tempfile.mkstemp(suffix=ext, prefix="credencial_img_")
+            import os; os.close(fd)
+
+            # Timeout de 10 segundos
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                with open(tmp_path, "wb") as f:
+                    f.write(resp.read())
+
+            self._img_cache[url] = tmp_path
+            logger.info("Imagen descargada: %s -> %s", url, tmp_path)
+            return tmp_path
+        except Exception as e:
+            logger.warning("No se pudo descargar imagen '%s': %s", url, e)
+            return None
 
 
     def _draw_qr(

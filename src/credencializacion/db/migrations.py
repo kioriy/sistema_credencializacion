@@ -3,7 +3,7 @@ Creación inicial de tablas y datos semilla.
 Ejecuta create_all para generar el esquema SQLite.
 """
 from credencializacion.db.engine import get_engine
-from credencializacion.db.models import Base, Cliente, Plantilla
+from credencializacion.db.models import Base, Cliente, Plantilla, ColaImpresion, ItemCola
 from credencializacion.db.engine import DatabaseSession
 
 

@@ -246,3 +246,104 @@ class Plantilla(Base):
             f"<Plantilla(id={self.id}, nombre='{self.nombre}', "
             f"tipo='{self.tipo}', {self.ancho}x{self.alto}cm)>"
         )
+
+
+class ColaImpresion(Base):
+    """Cola de impresión persistente.
+
+    Agrupa un conjunto de registros para imprimir sus frentes y/o vueltas.
+    El estado trackea qué caras ya fueron impresas para garantizar
+    correspondencia frente↔vuelta al dar vuelta la hoja.
+
+    Estados:
+    - pendiente: cola creada, nada impreso
+    - frentes_impresos: solo frentes enviados a impresora
+    - vueltas_impresas: solo vueltas enviados a impresora
+    - completada: ambas caras impresas
+    - error: fallo durante impresión
+    """
+    __tablename__ = "colas_impresion"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    nombre: Mapped[str] = mapped_column(String(255), nullable=False)
+    estado: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="pendiente"
+    )
+    impresora: Mapped[str | None] = mapped_column(
+        String(255), nullable=True
+    )  # Nombre de la impresora del sistema asignada
+    total_registros: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    # Relaciones
+    items: Mapped[list["ItemCola"]] = relationship(
+        back_populates="cola", cascade="all, delete-orphan",
+        order_by="ItemCola.orden",
+    )
+
+    @property
+    def estado_label(self) -> str:
+        """Etiqueta legible del estado."""
+        labels = {
+            "pendiente": "⏳ Pendiente",
+            "frentes_impresos": "📄 Frentes Impresos",
+            "vueltas_impresas": "📄 Vueltas Impresas",
+            "completada": "✅ Completada",
+            "error": "❌ Error",
+        }
+        return labels.get(self.estado, self.estado)
+
+    def __repr__(self) -> str:
+        return (
+            f"<ColaImpresion(id={self.id}, nombre='{self.nombre}', "
+            f"estado='{self.estado}', items={self.total_registros})>"
+        )
+
+
+class ItemCola(Base):
+    """Ítem individual de una cola de impresión.
+
+    Cada ítem apunta a un registro y a una plantilla específica,
+    permitiendo mezclar registros de distintos clientes/plantillas
+    en la misma cola.
+
+    El campo `orden` es CRÍTICO: garantiza que al imprimir las vueltas,
+    se respete exactamente el mismo orden en que se imprimieron los frentes.
+    """
+    __tablename__ = "items_cola"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    cola_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("colas_impresion.id", ondelete="CASCADE"), nullable=False
+    )
+    registro_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("registros.id", ondelete="CASCADE"), nullable=False
+    )
+    plantilla_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("plantillas.id", ondelete="CASCADE"), nullable=False
+    )
+    orden: Mapped[int] = mapped_column(
+        Integer, nullable=False
+    )  # Posición fija en la cola (1, 2, 3, ...)
+    estado_item: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="pendiente"
+    )  # "pendiente", "frente_impreso", "vuelta_impresa", "completado"
+
+    # Relaciones
+    cola: Mapped["ColaImpresion"] = relationship(back_populates="items")
+    registro: Mapped["Registro"] = relationship()
+    plantilla: Mapped["Plantilla"] = relationship()
+
+    def __repr__(self) -> str:
+        return (
+            f"<ItemCola(id={self.id}, cola={self.cola_id}, "
+            f"orden={self.orden}, registro={self.registro_id})>"
+        )

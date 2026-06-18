@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt, Signal, QSize, QMimeData, QPoint
 from PySide6.QtGui import QFont, QCursor, QIcon, QDrag, QMouseEvent, QFontDatabase
+import qtawesome as qta
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -507,6 +508,51 @@ class PropertiesPanel(QWidget):
             QDoubleSpinBox:focus, QSpinBox:focus, QComboBox:focus, QLineEdit:focus {{
                 border-color: {PRIMARY};
             }}
+            QSpinBox::up-button, QDoubleSpinBox::up-button {{
+                subcontrol-origin: border;
+                subcontrol-position: top right;
+                width: 20px;
+                border: none;
+                border-left: 1px solid {BORDER};
+                border-top-right-radius: 6px;
+            }}
+            QSpinBox::down-button, QDoubleSpinBox::down-button {{
+                subcontrol-origin: border;
+                subcontrol-position: bottom right;
+                width: 20px;
+                border: none;
+                border-left: 1px solid {BORDER};
+                border-bottom-right-radius: 6px;
+            }}
+            QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{
+                image: none;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-bottom: 4px solid {TEXT_LIGHT};
+                width: 0;
+                height: 0;
+            }}
+            QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{
+                image: none;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 4px solid {TEXT_LIGHT};
+                width: 0;
+                height: 0;
+            }}
+            QComboBox::drop-down {{
+                border: none;
+                width: 24px;
+            }}
+            QComboBox::down-arrow {{
+                image: none;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 4px solid {TEXT_LIGHT};
+                width: 0;
+                height: 0;
+                margin-right: 6px;
+            }}
         """
 
     def update_properties(self, element: dict | None) -> None:
@@ -802,6 +848,9 @@ class TemplateEditor(QWidget):
 
         main_layout.addWidget(splitter, stretch=1)
 
+        # ── Barra inferior (acciones) ──────────────────────────────
+        main_layout.addWidget(self._build_bottom_bar())
+
 
     def _build_top_toolbar(self) -> QFrame:
         """Toolbar superior mínima del editor (los controles principales viven en MainWindow)."""
@@ -833,8 +882,8 @@ class TemplateEditor(QWidget):
         """)
         
         layout = QVBoxLayout(container)
-        layout.setContentsMargins(40, 40, 40, 40)
-        layout.setSpacing(40)
+        layout.setContentsMargins(24, 16, 24, 16)
+        layout.setSpacing(20)
         layout.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
 
         self._scene_frente = CredentialScene(self)
@@ -843,7 +892,7 @@ class TemplateEditor(QWidget):
         self._scene_frente.selectionChanged.connect(self._on_scene_selection_changed)
         
         self._view_frente = CredentialView(self._scene_frente)
-        self._view_frente.setMinimumSize(400, 260)
+        self._view_frente.setMinimumHeight(320)
 
         self._scene_vuelta = CredentialScene(self)
         self._scene_vuelta.set_physical_size(8.5, 5.4)
@@ -851,35 +900,68 @@ class TemplateEditor(QWidget):
         self._scene_vuelta.selectionChanged.connect(self._on_scene_selection_changed)
         
         self._view_vuelta = CredentialView(self._scene_vuelta)
-        self._view_vuelta.setMinimumSize(400, 260)
+        self._view_vuelta.setMinimumHeight(320)
 
         # Contenedores con títulos clicables (abren selector de imagen base)
-        def make_side_header(title: str, side: str) -> "QLabel":
-            """Crea una etiqueta clicable para seleccionar la imagen base del lado."""
-            from PySide6.QtWidgets import QLabel
-            lbl = QLabel(f"🖼 {title}  <span style='font-size:10px; color:#94A3B8;'>(clic para cargar imagen base)</span>")
+        _preview_btn_style = f"""
+            QPushButton {{
+                background-color: transparent;
+                border: 1px solid {BORDER};
+                border-radius: 5px;
+                padding: 2px 6px;
+                color: {TEXT_LIGHT};
+                font-size: 14px;
+            }}
+            QPushButton:hover {{
+                border-color: {PRIMARY};
+                color: {PRIMARY};
+                background-color: #EFF6FF;
+            }}
+        """
+
+        def make_side_header(title: str, side: str) -> "QWidget":
+            """Crea una barra de cabecera con etiqueta clicable y botón de preview."""
+            from PySide6.QtWidgets import QLabel, QHBoxLayout
+            row = QWidget()
+            row_lay = QHBoxLayout(row)
+            row_lay.setContentsMargins(0, 0, 0, 0)
+            row_lay.setSpacing(6)
+
+            lbl = QLabel(f"🖼 {title}  <span style='font-size:10px; color:#94A3B8;'>(clic para imagen base)</span>")
             lbl.setTextFormat(Qt.TextFormat.RichText)
             lbl.setFont(QFont("Inter", 10, QFont.Weight.Bold))
-            lbl.setStyleSheet(f"""
-                color: {TEXT_LIGHT};
-                padding: 4px 0px;
-                cursor: pointer;
-            """)
+            lbl.setStyleSheet(f"color: {TEXT_LIGHT}; padding: 4px 0px;")
             lbl.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
             lbl.mousePressEvent = lambda e, s=side: self._select_base_image(s)
-            return lbl
+            row_lay.addWidget(lbl, stretch=1)
+
+            # Botón vista previa solo icono (icon font)
+            btn_prev = QPushButton()
+            btn_prev.setIcon(qta.icon("fa5s.eye", color="#64748B"))
+            btn_prev.setIconSize(QSize(16, 16))
+            btn_prev.setToolTip(f"Vista previa — {title} (2 registros)")
+            btn_prev.setFixedSize(28, 24)
+            btn_prev.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            btn_prev.setStyleSheet(_preview_btn_style)
+            btn_prev.clicked.connect(lambda _, s=side: self.preview_template(cara=s))
+            row_lay.addWidget(btn_prev)
+
+            if side == "frente":
+                self._lbl_frente_header = lbl
+                self._btn_preview_frente = btn_prev
+            else:
+                self._lbl_vuelta_header = lbl
+                self._btn_preview_vuelta = btn_prev
+
+            return row
 
         def wrap_view(title: str, view: QWidget, side: str) -> QWidget:
             wrapper = QWidget()
             w_layout = QVBoxLayout(wrapper)
             w_layout.setContentsMargins(0, 0, 0, 0)
             w_layout.setSpacing(4)
-            lbl = make_side_header(title, side)
-            if side == "frente":
-                self._lbl_frente_header = lbl
-            else:
-                self._lbl_vuelta_header = lbl
-            w_layout.addWidget(lbl)
+            header_row = make_side_header(title, side)
+            w_layout.addWidget(header_row)
             w_layout.addWidget(view)
             return wrapper
 
@@ -906,91 +988,76 @@ class TemplateEditor(QWidget):
         layout.setSpacing(8)
 
         self._properties_panel = PropertiesPanel()
-        
+
         prop_scroll = QScrollArea()
         prop_scroll.setWidgetResizable(True)
         prop_scroll.setFrameShape(QFrame.Shape.NoFrame)
         prop_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         prop_scroll.setWidget(self._properties_panel)
-        
-        layout.addWidget(prop_scroll, stretch=1)
+
+        # stretch 3:1 — propiedades recibe 3x más espacio que capas
+        layout.addWidget(prop_scroll, stretch=3)
 
         self._layers_panel = LayersPanel()
+        self._layers_panel.setMaximumHeight(160)
         layout.addWidget(self._layers_panel, stretch=1)
 
         return panel
 
-    def _build_bottom_bar(self) -> QFrame:
-        """Construye la barra inferior con botones de acción.
+    def _build_bottom_bar(self) -> QLabel:
+        """Construye la barra inferior de notificaciones (tipo status bar).
 
         Returns:
-            QFrame con Vista Previa + Guardar Credencial.
+            QLabel con estilo de notificaciones.
         """
-        bar = QFrame()
-        bar.setFixedHeight(64)
+        bar = QLabel("")
+        bar.setFixedHeight(28)
         bar.setStyleSheet(f"""
-            QFrame {{
-                background-color: {CARD_BG};
-                border-top: 1px solid {BORDER};
-            }}
-        """)
-
-        layout = QHBoxLayout(bar)
-        layout.setContentsMargins(16, 0, 16, 0)
-        layout.setSpacing(12)
-        layout.addStretch()
-
-        # Vista Previa (outline)
-        self._btn_bottom_preview = QPushButton("Vista Previa")
-        self._btn_bottom_preview.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self._btn_bottom_preview.setMinimumHeight(40)
-        self._btn_bottom_preview.setStyleSheet(f"""
-            QPushButton {{
-                background-color: transparent;
-                border: 2px solid {BORDER};
-                border-radius: 8px;
-                padding: 8px 24px;
-                color: {TEXT_DARK};
-                font-size: 13px;
-                font-weight: 600;
-            }}
-            QPushButton:hover {{
-                border-color: {PRIMARY};
-                color: {PRIMARY};
-            }}
-        """)
-        layout.addWidget(self._btn_bottom_preview)
-
-        # Guardar Credencial (primary)
-        self._btn_save = QPushButton("💾  Guardar Credencial")
-        self._btn_save.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self._btn_save.setMinimumHeight(40)
-        self._btn_save.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {PRIMARY};
+            QLabel {{
+                background-color: #1E293B;
+                color: #94A3B8;
+                font-family: 'Inter', sans-serif;
+                font-size: 12px;
+                padding: 0 12px;
                 border: none;
-                border-radius: 8px;
-                padding: 8px 24px;
-                color: #FFFFFF;
-                font-size: 13px;
-                font-weight: 600;
-            }}
-            QPushButton:hover {{
-                background-color: #E04848;
-            }}
-            QPushButton:pressed {{
-                background-color: #C73E3E;
+                border-radius: 0;
             }}
         """)
-        layout.addWidget(self._btn_save)
-
+        self._status_bar = bar
         return bar
+
+    def set_status(self, message: str, level: str = "info") -> None:
+        """Actualiza la barra de notificaciones con un mensaje.
+
+        Args:
+            message: Texto a mostrar.
+            level: 'info', 'success', 'error', 'warning'.
+        """
+        from PySide6.QtCore import QCoreApplication
+        colors = {
+            "info": ("#1E293B", "#94A3B8"),
+            "success": ("#052E16", "#4ADE80"),
+            "error": ("#450A0A", "#FCA5A5"),
+            "warning": ("#451A03", "#FCD34D"),
+        }
+        bg, fg = colors.get(level, colors["info"])
+        self._status_bar.setStyleSheet(f"""
+            QLabel {{
+                background-color: {bg};
+                color: {fg};
+                font-family: 'Inter', sans-serif;
+                font-size: 12px;
+                padding: 0 12px;
+                border: none;
+            }}
+        """)
+        self._status_bar.setText(message)
+        QCoreApplication.processEvents()
 
     # ── Conexiones ─────────────────────────────────────────────────
 
     def _connect_signals(self) -> None:
         """Conecta señales internas del editor."""
-        # Conexión toolbar -> canvas (placeholder para integración real)
         self._canvas_toolbar.item_dragged.connect(self._on_tool_dragged)
         self._layers_panel.layer_selected.connect(self._on_layer_selected)
         self._properties_panel.property_changed.connect(self._on_property_changed)
@@ -1102,7 +1169,7 @@ class TemplateEditor(QWidget):
             try:
                 shutil.copy2(src, dest)
             except Exception as e:
-                QMessageBox.critical(self, "Error", f"No se pudo copiar la imagen: {e}")
+                self.set_status(f"❌ No se pudo copiar la imagen: {e}", "error")
                 return
 
         # Guardar la ruta en los recursos de la plantilla (en memoria y DB)
@@ -1198,6 +1265,8 @@ class TemplateEditor(QWidget):
 
     def save_template(self) -> None:
         """Guarda el estado actual del editor en la base de datos."""
+        # Sincronizar posiciones actuales del canvas con el modelo antes de guardar
+        self._sync_scene_to_model()
         from credencializacion.db.engine import get_session
         from credencializacion.db.models import Plantilla
         from credencializacion.ui.dialogs.template_dialogs import SaveTemplateDialog
@@ -1229,7 +1298,7 @@ class TemplateEditor(QWidget):
                     session.refresh(nueva)
                     session.expunge(nueva)
                     self.load_template(nueva)
-                    QMessageBox.information(self, "Éxito", "Plantilla guardada correctamente.")
+                    self.set_status("✅ Plantilla guardada correctamente.", "success")
         else:
             with get_session() as session:
                 from sqlalchemy.orm.attributes import flag_modified
@@ -1240,7 +1309,7 @@ class TemplateEditor(QWidget):
                     flag_modified(plantilla_db, "elementos_frente")
                     flag_modified(plantilla_db, "elementos_vuelta")
                     session.commit()
-                    QMessageBox.information(self, "Éxito", "Plantilla actualizada.")
+                    self.set_status("✅ Plantilla actualizada.", "success")
 
     def open_template_dialog(self) -> None:
         """Abre el diálogo para cargar una plantilla guardada."""
@@ -1258,8 +1327,15 @@ class TemplateEditor(QWidget):
 
 
 
-    def preview_template(self) -> None:
-        """Genera un PDF de vista previa con el primer registro real del cliente."""
+    def preview_template(self, cara: str | None = None) -> None:
+        """Genera un PDF de vista previa con los primeros dos registros reales.
+
+        Args:
+            cara: 'frente', 'vuelta', o 'both' (frente+vuelta en 2 páginas).
+                  None usa self._current_side.
+        """
+        # Sincronizar posiciones actuales del canvas con el modelo antes de renderizar
+        self._sync_scene_to_model()
         from credencializacion.renderer.pdf_engine import PDFEngine
         from credencializacion.db.models import Registro
         from credencializacion.db.engine import get_session
@@ -1269,6 +1345,8 @@ class TemplateEditor(QWidget):
         from pathlib import Path
         import tempfile
         import os
+
+        cara = cara or self._current_side
 
         # La plantilla debe estar guardada para conocer el cliente_id
         if not self._plantilla:
@@ -1282,19 +1360,21 @@ class TemplateEditor(QWidget):
             if not self._plantilla:
                 return
 
-        # Buscar el primer registro real en la BD para el cliente de esta plantilla
+        # Buscar los primeros 2 registros del cliente en la BD
+        registros: list[Registro] = []
         with get_session() as session:
-            primer_registro = (
+            rows = (
                 session.query(Registro)
                 .filter(Registro.cliente_id == self._plantilla.cliente_id)
-                .first()
+                .limit(2)
+                .all()
             )
-            if primer_registro:
-                # Separar de la sesión para usar fuera del bloque with
-                session.expunge(primer_registro)
+            for r in rows:
+                session.expunge(r)
+                registros.append(r)
 
         # Si no hay registros, ofrecer sincronizar ahora
-        if not primer_registro:
+        if not registros:
             reply = QMessageBox.question(
                 self,
                 "Sin datos sincronizados",
@@ -1304,7 +1384,6 @@ class TemplateEditor(QWidget):
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
             if reply == QMessageBox.StandardButton.Yes:
-                # Cambiar a la página del panel de control (índice 0)
                 parent = self.parent()
                 while parent and not hasattr(parent, "_stack"):
                     parent = parent.parent()
@@ -1312,20 +1391,49 @@ class TemplateEditor(QWidget):
                     parent._stack.setCurrentIndex(0)
             return
 
-        # Renderizar PDF con datos reales
         engine = PDFEngine(self._plantilla)
         fd, temp_path_str = tempfile.mkstemp(suffix=".pdf", prefix="preview_credencial_")
         os.close(fd)
         temp_path = Path(temp_path_str)
 
         try:
-            engine.render([primer_registro], self._current_side, temp_path)
+            if cara == "both":
+                engine.render_both(registros, temp_path)
+            else:
+                engine.render(registros, cara, temp_path)
+
             QDesktopServices.openUrl(QUrl.fromLocalFile(temp_path_str))
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"No se pudo generar la vista previa: {e}")
+            self.set_status(f"❌ Error de vista previa: {e}", "error")
 
 
 
+
+    def _sync_scene_to_model(self) -> None:
+        """Sincroniza las posiciones y propiedades actuales de los GraphicElement
+        del canvas con el modelo de datos (plantilla o _local_*).
+
+        Esto es necesario porque cuando el usuario mueve un elemento en el lienzo,
+        las coordenadas se actualizan en el QGraphicsItem pero no se propagan
+        automáticamente al dict JSON del modelo. Este método fuerza la sincronización
+        antes de cualquier operación de render o guardado.
+        """
+        from credencializacion.ui.widgets.canvas import GraphicElement
+
+        for side, scene in (("frente", self._scene_frente), ("vuelta", self._scene_vuelta)):
+            # Recopilar datos actualizados de todos los GraphicElement del canvas
+            canvas_items = [
+                item for item in scene.items()
+                if isinstance(item, GraphicElement)
+            ]
+            if not canvas_items:
+                continue
+
+            # get_data() sincroniza pos().x/y → data["x"],data["y"] en mm
+            synced_data = [item.get_data() for item in canvas_items]
+
+            # Actualizar el modelo con la lista sincronizada
+            self._set_elementos(side, synced_data)
 
     def _get_elementos(self, side: str) -> list[dict]:
         if self._plantilla:

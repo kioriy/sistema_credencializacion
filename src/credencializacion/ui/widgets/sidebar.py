@@ -129,6 +129,7 @@ class Sidebar(QWidget):
     NAV_ITEMS: list[tuple[str, str, bool]] = [
         ("fa5s.th-large", "Panel de Control", False),
         ("fa5s.palette", "Editor de Plantillas", False),
+        ("fa5s.clone", "Gestión Plantillas", False),
         ("fa5s.print", "Centro de Impresión", False),
     ]
 
@@ -195,33 +196,49 @@ class Sidebar(QWidget):
         layout.addSpacing(16)
 
     def _create_logo_area(self) -> QWidget:
-        """Crea el área de logo con 'ME' + título + subtítulo."""
-        container = QWidget()
-        container.setFixedHeight(90)
-        layout = QHBoxLayout(container)
-        layout.setContentsMargins(16, 20, 16, 8)
-        layout.setSpacing(10)
+        """Crea el área de logo con icono + título + subtítulo."""
+        from pathlib import Path
+        from PySide6.QtGui import QPixmap
 
-        # Ícono "ME"
-        icon_label = QLabel("ME")
+        container = QWidget()
+        container.setFixedHeight(70)
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(16, 12, 16, 8)
+        layout.setSpacing(8)
+
+        # Ícono de la app (desde resources/icon.png)
+        icon_label = QLabel()
         icon_label.setFixedSize(40, 40)
         icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        icon_label.setStyleSheet(f"""
-            QLabel {{
-                background-color: {COLORS["primary"]};
-                color: {COLORS["text_white"]};
-                border-radius: 10px;
-                font-size: 15px;
-                font-weight: 800;
-            }}
-        """)
+        icon_label.setStyleSheet("background: transparent; border: none;")
+        icon_path = Path(__file__).parent.parent.parent / "resources" / "icon.png"
+        if icon_path.exists():
+            pix = QPixmap(str(icon_path)).scaled(
+                40, 40,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            icon_label.setPixmap(pix)
+        else:
+            # Fallback: cuadro rojo con "ME"
+            icon_label.setText("ME")
+            icon_label.setStyleSheet(f"""
+                QLabel {{
+                    background-color: {COLORS["primary"]};
+                    color: {COLORS["text_white"]};
+                    border-radius: 10px;
+                    font-size: 15px;
+                    font-weight: 800;
+                }}
+            """)
         layout.addWidget(icon_label)
 
-        # Texto al lado del ícono
+        # Texto al lado del ícono (centrado verticalmente, sin espacio)
         text_container = QWidget()
         text_layout = QVBoxLayout(text_container)
         text_layout.setContentsMargins(0, 0, 0, 0)
         text_layout.setSpacing(0)
+        text_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
 
         title = QLabel("miescuela.net")
         title.setStyleSheet(f"""
@@ -229,16 +246,18 @@ class Sidebar(QWidget):
                 color: {COLORS["text"]};
                 font-size: 16px;
                 font-weight: 800;
+                line-height: 1;
             }}
         """)
         text_layout.addWidget(title)
 
-        subtitle = QLabel("Portal Oficial")
+        subtitle = QLabel("Credencialización")
         subtitle.setStyleSheet(f"""
             QLabel {{
                 color: {COLORS["text_light"]};
                 font-size: 11px;
                 font-weight: 500;
+                line-height: 1;
             }}
         """)
         text_layout.addWidget(subtitle)

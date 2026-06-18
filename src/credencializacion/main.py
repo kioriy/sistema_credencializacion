@@ -37,6 +37,16 @@ def main() -> None:
     from credencializacion.ui.main_window import MainWindow
 
     window = MainWindow()
+
+    # Establecer icono de la aplicación (título, dock/taskbar)
+    from pathlib import Path
+    from PySide6.QtGui import QIcon
+    icon_path = Path(__file__).parent / "resources" / "icon.png"
+    if icon_path.exists():
+        app_icon = QIcon(str(icon_path))
+        app.setWindowIcon(app_icon)
+        window.setWindowIcon(app_icon)
+
     window.show()
     logger.info("Ventana principal visible. Esperando interacción del usuario…")
 

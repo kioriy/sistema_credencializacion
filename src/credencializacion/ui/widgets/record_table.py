@@ -54,8 +54,9 @@ MAIN_BG = "#F5F7FA"
 # Mapeo de estados a colores de badge
 STATUS_COLORS: dict[str, tuple[str, str]] = {
     # estado: (background, text_color)
+    "sin_foto": (WARNING, "#FFFFFF"),
     "pending": (WARNING, "#FFFFFF"),
-    "pendiente": (WARNING, "#FFFFFF"),
+    "pendiente": ("#94A3B8", "#FFFFFF"),
     "impreso": (SUCCESS, "#FFFFFF"),
     "error": (ERROR, "#FFFFFF"),
     "en_cola": (INFO_BLUE, "#FFFFFF"),
@@ -66,13 +67,14 @@ STATUS_COLORS: dict[str, tuple[str, str]] = {
 
 # Columnas de la tabla
 COLUMNS = [
-    "FOTO",       # 0: Thumbnail
-    "ID",         # 1: Matrícula / enrollment code
-    "NOMBRE",     # 2: Nombre completo
-    "GRADO",      # 3: Grado
-    "GRUPO",      # 4: Grupo
-    "ESTADO",     # 5: Badge de estado
-    "ACCIÓN",     # 6: Botón agregar a cola
+    " ",          # 0: Checkbox
+    "FOTO",       # 1: Thumbnail
+    "ID",         # 2: Matrícula / enrollment code
+    "NOMBRE",     # 3: Nombre completo
+    "GRADO",      # 4: Grado
+    "GRUPO",      # 5: Grupo
+    "ESTADO",     # 6: Badge de estado
+    "ACCIÓN",     # 7: Botón agregar a cola
 ]
 
 PHOTO_SIZE = 32
@@ -195,9 +197,11 @@ class RecordTable(QTableWidget):
 
     Signals:
         record_double_clicked(int): ID del registro al hacer doble clic.
+        add_to_queue_clicked(int): ID del registro al hacer clic en agregar a cola.
     """
 
     record_double_clicked = Signal(int)
+    add_to_queue_clicked = Signal(int)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -213,20 +217,22 @@ class RecordTable(QTableWidget):
 
         # Configurar anchos de columna
         header = self.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)   # Foto
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)   # ID
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch) # Nombre
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)   # Grado
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)   # Grupo
-        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)   # Estado
-        header.setSectionResizeMode(6, QHeaderView.ResizeMode.Fixed)   # Acción
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)   # Checkbox
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)   # Foto
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)   # ID
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch) # Nombre
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)   # Grado
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)   # Grupo
+        header.setSectionResizeMode(6, QHeaderView.ResizeMode.Fixed)   # Estado
+        header.setSectionResizeMode(7, QHeaderView.ResizeMode.Fixed)   # Acción
 
-        self.setColumnWidth(0, 50)   # Foto
-        self.setColumnWidth(1, 80)   # ID
-        self.setColumnWidth(3, 70)   # Grado
-        self.setColumnWidth(4, 70)   # Grupo
-        self.setColumnWidth(5, 130)  # Estado
-        self.setColumnWidth(6, 70)   # Acción
+        self.setColumnWidth(0, 40)   # Checkbox
+        self.setColumnWidth(1, 50)   # Foto
+        self.setColumnWidth(2, 80)   # ID
+        self.setColumnWidth(4, 70)   # Grado
+        self.setColumnWidth(5, 70)   # Grupo
+        self.setColumnWidth(6, 130)  # Estado
+        self.setColumnWidth(7, 70)   # Acción
 
         # Comportamiento
         self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -301,8 +307,17 @@ class RecordTable(QTableWidget):
         for row, reg in enumerate(records):
             self._registro_ids.append(reg.id)
             self._populate_row(row, reg)
-
         self.setSortingEnabled(True)
+
+    def set_photo_by_id(self, reg_id: int, pixmap: QPixmap) -> None:
+        """Asigna una foto circular a la fila que corresponda al ID dado."""
+        for row in range(self.rowCount()):
+            chk_item = self.item(row, 0)
+            if chk_item and chk_item.data(Qt.ItemDataRole.UserRole) == reg_id:
+                photo_item = self.item(row, 1)
+                if photo_item:
+                    photo_item.setIcon(QIcon(pixmap))
+                break
 
     def _populate_row(self, row: int, reg: "Registro") -> None:
         """Llena una fila con los datos de un registro.
@@ -329,42 +344,42 @@ class RecordTable(QTableWidget):
         photo_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
         self.setItem(row, 1, photo_item)
 
-        # Col 2: Nombre & ID
-        nombre = reg.nombre_completo or "Sin nombre"
+        # Col 2: ID
         enrollment = reg.enrollment_code or "—"
-        name_widget = QWidget()
-        name_layout = QVBoxLayout(name_widget)
-        name_layout.setContentsMargins(4, 4, 4, 4)
-        name_layout.setSpacing(0)
+        id_item = QTableWidgetItem(enrollment)
+        id_item.setFont(QFont("Inter", 11))
+        id_item.setForeground(QColor(TEXT_LIGHT))
+        self.setItem(row, 2, id_item)
 
-        lbl_name = QLabel(nombre)
-        lbl_name.setFont(QFont("Inter", 12, QFont.Weight.DemiBold))
-        lbl_name.setStyleSheet(f"color: {TEXT_DARK}; background: transparent;")
+        # Col 3: NOMBRE
+        nombre = reg.nombre_completo or "Sin nombre"
+        name_item = QTableWidgetItem(nombre)
+        name_item.setFont(QFont("Inter", 12, QFont.Weight.DemiBold))
+        name_item.setForeground(QColor(TEXT_DARK))
+        self.setItem(row, 3, name_item)
 
-        lbl_id = QLabel(enrollment)
-        lbl_id.setFont(QFont("Inter", 10))
-        lbl_id.setStyleSheet(f"color: {TEXT_LIGHT}; background: transparent;")
+        # Col 4: Grado
+        grado_item = QTableWidgetItem(reg.get_dato("grado", "—"))
+        grado_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        grado_item.setFont(QFont("Inter", 11))
+        self.setItem(row, 4, grado_item)
 
-        name_layout.addWidget(lbl_name)
-        name_layout.addWidget(lbl_id)
-        self.setCellWidget(row, 2, name_widget)
+        # Col 5: Grupo
+        group_item = QTableWidgetItem(reg.get_dato("grupo", "—"))
+        group_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        group_item.setFont(QFont("Inter", 11))
+        self.setItem(row, 5, group_item)
 
-        # Col 3: Institución
-        inst_item = QTableWidgetItem(reg.institucion)
-        inst_item.setFont(QFont("Inter", 11))
-        inst_item.setForeground(QColor(TEXT_DARK))
-        self.setItem(row, 3, inst_item)
-
-        # Col 4: Estado badge
+        # Col 6: Estado badge
         estado = self._determine_status(reg)
         bg, fg = STATUS_COLORS.get(estado, (TEXT_LIGHT, "#FFFFFF"))
         badge = StatusBadge(self._status_label(estado), bg, fg)
-        self.setCellWidget(row, 4, badge)
+        self.setCellWidget(row, 6, badge)
 
-        # Col 5: Botones de acción
-        actions = ActionButtonsWidget(reg.id)
-        actions.view_clicked.connect(lambda rid: self.record_double_clicked.emit(rid))
-        self.setCellWidget(row, 5, actions)
+        # Col 7: Botón agregar a cola
+        actions = AddToQueueButton(reg.id)
+        actions.add_clicked.connect(lambda rid: self.add_to_queue_clicked.emit(rid)) 
+        self.setCellWidget(row, 7, actions)
 
         # Altura de fila
         self.setRowHeight(row, 56)
@@ -372,18 +387,23 @@ class RecordTable(QTableWidget):
     def _determine_status(self, reg: "Registro") -> str:
         """Determina el estado visual de un registro.
 
-        Prioriza: falta foto > estado_impresion > credential_status.
+        Prioriza: falta foto > credential_status > estado_impresion.
         """
         if not reg.photo_path:
-            return "pendiente"  # Falta foto
+            return "sin_foto"  # Falta foto
         if reg.credential_status == "replacement_requested":
             return "replacement_requested"
-        return reg.estado_impresion or "pendiente"
+        if reg.credential_status == "ready":
+            return "ready"
+        if reg.estado_impresion and reg.estado_impresion != "pendiente":
+            return reg.estado_impresion
+        return "pendiente"
 
     def _status_label(self, estado: str) -> str:
         """Convierte un estado interno al texto visible en español."""
         labels = {
-            "pendiente": "⚠ Falta Foto",
+            "sin_foto": "⚠ Falta Foto",
+            "pendiente": "📝 Pendiente",
             "impreso": "✅ Aprobado",
             "error": "❌ Error",
             "en_cola": "🔵 En Cola",
@@ -396,6 +416,8 @@ class RecordTable(QTableWidget):
     def get_selected_ids(self) -> list[int]:
         """Obtiene los IDs de las filas seleccionadas (selección de fila Qt).
 
+        Lee el reg.id almacenado en UserRole de la columna 0 (checkbox).
+
         Returns:
             Lista de IDs de registros seleccionados.
         """
@@ -405,11 +427,11 @@ class RecordTable(QTableWidget):
 
         selected: list[int] = []
         for row in sorted(selected_rows):
-            item = self.item(row, 1)  # Col 1 = ID/matrícula
+            item = self.item(row, 0)  # Col 0 = checkbox con reg.id en UserRole
             if item:
-                text = item.text()
-                if text:
-                    selected.append(text)
+                reg_id = item.data(Qt.ItemDataRole.UserRole)
+                if reg_id is not None:
+                    selected.append(reg_id)
         return selected
 
     def select_all(self, checked: bool) -> None:

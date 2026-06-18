@@ -201,7 +201,13 @@ class CanvasToolbar(QWidget):
         # Elementos
         elements: list[dict[str, str]] = [
             {"label": "Texto Compuesto", "type": "composite", "icon": "📝", "campo_dato": "composite"},
-            {"label": "Foto Estudiante", "type": "photo_path", "icon": "📷", "campo_dato": "photo_url"},
+            # ── Imágenes ──
+            {"label": "Foto Estudiante",  "type": "photo_path", "icon": "📷", "campo_dato": "photo_url"},
+            {"label": "Foto Papá",        "type": "photo_path", "icon": "👨", "campo_dato": "url_foto_papa"},
+            {"label": "Foto Mamá",        "type": "photo_path", "icon": "👩", "campo_dato": "url_foto_mama"},
+            {"label": "Foto Autorizado",  "type": "photo_path", "icon": "🧑", "campo_dato": "url_foto_autorizado"},
+            {"label": "Logo Escuela",     "type": "photo_path", "icon": "🏫", "campo_dato": "logo_escuela"},
+            # ── Texto ──
             {"label": "Nombre", "type": "text", "icon": "𝐀", "campo_dato": "nombre"},
             {"label": "Apellido Paterno", "type": "text", "icon": "𝐀", "campo_dato": "apellido_paterno"},
             {"label": "Apellido Materno", "type": "text", "icon": "𝐀", "campo_dato": "apellido_materno"},

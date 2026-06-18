@@ -123,6 +123,10 @@ class GraphicElement(QGraphicsItem):
         else:
             font.setPointSize(font_size)
 
+        # Negrita e itálica
+        font.setBold(props.get("font_weight", "normal") == "bold")
+        font.setItalic(bool(props.get("font_italic", False)))
+
         # Fondo suave semi-transparente para que sea legible
         if not test_text:
             bg = QColor("#EFF6FF") if elem_type == "composite" else QColor("#F8FAFC")
@@ -135,6 +139,31 @@ class GraphicElement(QGraphicsItem):
         painter.drawText(self._rect, Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap, texto)
 
     def _paint_image(self, painter: QPainter, props: dict, label: str) -> None:
+        from pathlib import Path
+        from PySide6.QtGui import QPixmap
+
+        # Si hay una ruta de imagen válida en test_text, dibujar la imagen real
+        test_img = props.get("test_text", "")
+        if test_img and Path(str(test_img)).exists():
+            pixmap = QPixmap(str(test_img))
+            if not pixmap.isNull():
+                scaled = pixmap.scaled(
+                    int(self._rect.width()),
+                    int(self._rect.height()),
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                # Centrar dentro del rect
+                x_off = (self._rect.width() - scaled.width()) / 2
+                y_off = (self._rect.height() - scaled.height()) / 2
+                painter.drawPixmap(
+                    int(self._rect.x() + x_off),
+                    int(self._rect.y() + y_off),
+                    scaled,
+                )
+                return
+
+        # Placeholder con borde y etiqueta descriptiva
         painter.setPen(QPen(QColor("#94A3B8"), 1, Qt.PenStyle.SolidLine))
         painter.setBrush(QColor("#F1F5F9"))
         painter.drawRect(self._rect)
@@ -154,7 +183,7 @@ class GraphicElement(QGraphicsItem):
             else:
                 label = f"📱 QR\n[{self._data.get('campo_dato', 'token')}]"
         elif self._data.get("type") == "barcode":
-            label = f"▮▮▮ Código\n[{self._data.get('campo_dato', 'token')}]"
+            label = f"▎▎▎ Código\n[{self._data.get('campo_dato', 'token')}]"
                 
         painter.drawText(self._rect, Qt.AlignmentFlag.AlignCenter, label)
 
@@ -292,6 +321,10 @@ class CredentialView(QGraphicsView):
         # Dibujar sombra paralela del lienzo
         self.setObjectName("credentialView")
 
+        # Política: expande para llenar el espacio disponible
+        from PySide6.QtWidgets import QSizePolicy
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
     def drawBackground(self, painter: QPainter, rect: QRectF):
         # Dibujar fondo blanco del lienzo
         scene_rect = self.sceneRect()
@@ -301,7 +334,22 @@ class CredentialView(QGraphicsView):
         painter.setPen(QColor("#CBD5E1"))
         painter.drawRect(scene_rect)
 
+    def resizeEvent(self, event):
+        """Ajusta la escena para que quepa completa en la vista sin scroll."""
+        super().resizeEvent(event)
+        sr = self.sceneRect()
+        if sr.width() > 0 and sr.height() > 0:
+            self.fitInView(sr, Qt.AspectRatioMode.KeepAspectRatio)
+
+    def showEvent(self, event):
+        """Ajusta al mostrarse por primera vez."""
+        super().showEvent(event)
+        sr = self.sceneRect()
+        if sr.width() > 0 and sr.height() > 0:
+            self.fitInView(sr, Qt.AspectRatioMode.KeepAspectRatio)
+
     def set_zoom(self, level_percent: int):
         self.resetTransform()
         scale = level_percent / 100.0
         self.scale(scale, scale)
+
