@@ -123,6 +123,7 @@ class Sidebar(QWidget):
     """
 
     page_changed = Signal(int)
+    update_requested = Signal()
 
     # Definición de ítems de navegación
     # (icono_qta, etiqueta, es_seccion_inferior)
@@ -189,6 +190,12 @@ class Sidebar(QWidget):
             )
             layout.addWidget(item)
             self._items.append(item)
+
+        # --- Botón de Actualizar (Acción, no página) ---
+        self.btn_update = SidebarItem("fa5s.cloud-download-alt", "Buscar Actualización")
+        self.btn_update.setCheckable(False)
+        self.btn_update.clicked.connect(self.update_requested.emit)
+        layout.addWidget(self.btn_update)
 
         layout.addSpacing(12)
 

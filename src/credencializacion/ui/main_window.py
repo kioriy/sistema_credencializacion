@@ -74,6 +74,7 @@ class MainWindow(QMainWindow):
         # ---- Sidebar ----
         self._sidebar = Sidebar()
         self._sidebar.page_changed.connect(self._on_page_changed)
+        self._sidebar.update_requested.connect(self._on_update_requested)
         root_layout.addWidget(self._sidebar)
 
         # ---- Columna derecha: header + stack ----
@@ -406,3 +407,12 @@ class MainWindow(QMainWindow):
         # Auto-refrescar colas al navegar al Centro de Impresión (índice 3)
         if index == 3:
             self._print_center.refresh_queues()
+
+    def _on_update_requested(self) -> None:
+        """Ejecuta una comprobación manual de actualizaciones."""
+        try:
+            from credencializacion.core.updater import check_for_updates
+            check_for_updates(self, manual=True)
+        except Exception as e:
+            from credencializacion.ui.widgets.toast import ToastManager
+            ToastManager.instance().show_toast(f"Error: {e}", "error")

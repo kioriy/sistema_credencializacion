@@ -131,28 +131,38 @@ def apply_update(zip_path: Path) -> bool:
         return False
 
 
-def check_for_updates(parent=None) -> None:
+def check_for_updates(parent=None, manual: bool = False) -> None:
     """Verifica actualizaciones y muestra diálogo al usuario si hay una nueva.
 
     Se ejecuta en un hilo separado para no bloquear la UI.
 
     Args:
         parent: Ventana padre para el diálogo (QWidget o None).
+        manual: Si es True, muestra mensajes (toasts) incluso si no hay actualizaciones.
     """
     # Solo verificar si se ejecuta como ejecutable compilado
     # (en desarrollo no queremos actualizar automáticamente)
     if not getattr(sys, "frozen", False):
         logger.debug("Modo desarrollo — verificación de actualizaciones omitida.")
+        if manual:
+            _notify_no_update("No se puede actualizar en modo desarrollo.", "warning")
         return
 
     def _check():
+        if manual:
+            _notify_no_update("Buscando actualizaciones...", "info")
+
         release = get_latest_release()
         if not release:
+            if manual:
+                _notify_no_update("No se pudo conectar con el servidor.", "error")
             return
 
         tag = release.get("tag_name", "")
         if not is_newer(tag):
             logger.info("La app está actualizada (v%s).", APP_VERSION)
+            if manual:
+                _notify_no_update(f"Ya tienes la última versión (v{APP_VERSION}).", "success")
             return
 
         # Buscar el asset descargable
@@ -182,6 +192,15 @@ def check_for_updates(parent=None) -> None:
 from PySide6.QtCore import QEvent
 
 _UPDATE_EVENT_TYPE = QEvent.Type(QEvent.registerEventType())
+_NO_UPDATE_EVENT_TYPE = QEvent.Type(QEvent.registerEventType())
+
+
+def _notify_no_update(message: str, level: str) -> None:
+    """Emite un evento para mostrar un toast de feedback en chequeos manuales."""
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance()
+    if app:
+        app.postEvent(app, _NoUpdateEvent(message, level))
 
 
 class _UpdateEvent(QEvent):
@@ -191,6 +210,13 @@ class _UpdateEvent(QEvent):
         self.asset_url = asset_url
         self.release_url = release_url
         self.parent_widget = parent
+
+
+class _NoUpdateEvent(QEvent):
+    def __init__(self, message: str, level: str):
+        super().__init__(_NO_UPDATE_EVENT_TYPE)
+        self.message = message
+        self.level = level
 
 
 class UpdateEventFilter:
@@ -203,6 +229,10 @@ class UpdateEventFilter:
             def eventFilter(self_, obj, event):
                 if event.type() == _UPDATE_EVENT_TYPE:
                     _show_update_dialog(event.version, event.asset_url, event.release_url, event.parent_widget)
+                    return True
+                if event.type() == _NO_UPDATE_EVENT_TYPE:
+                    from credencializacion.ui.widgets.toast import ToastManager
+                    ToastManager.instance().show_toast(event.message, event.level)
                     return True
                 return False
 
