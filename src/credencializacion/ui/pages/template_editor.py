@@ -1027,13 +1027,14 @@ class TemplateEditor(QWidget):
         return bar
 
     def set_status(self, message: str, level: str = "info") -> None:
-        """Actualiza la barra de notificaciones con un mensaje.
+        """Actualiza la barra de notificaciones con un mensaje y muestra un toast.
 
         Args:
             message: Texto a mostrar.
             level: 'info', 'success', 'error', 'warning'.
         """
         from PySide6.QtCore import QCoreApplication
+        from credencializacion.ui.widgets.toast import ToastManager
         colors = {
             "info": ("#1E293B", "#94A3B8"),
             "success": ("#052E16", "#4ADE80"),
@@ -1053,6 +1054,8 @@ class TemplateEditor(QWidget):
         """)
         self._status_bar.setText(message)
         QCoreApplication.processEvents()
+        # Toast notification
+        ToastManager.instance().show_toast(message, level)
 
     # ── Conexiones ─────────────────────────────────────────────────
 

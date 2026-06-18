@@ -846,13 +846,14 @@ class ControlPanel(QWidget):
             )
 
     def set_status(self, message: str, level: str = "info") -> None:
-        """Actualiza el footer de estado con un mensaje.
+        """Actualiza el footer de estado con un mensaje y muestra un toast.
 
         Args:
             message: Texto a mostrar.
             level: 'info', 'success', 'error', 'warning', 'sync'.
         """
         from PySide6.QtCore import QCoreApplication, QTimer
+        from credencializacion.ui.widgets.toast import ToastManager
         colors = {
             "info": ("#1E293B", "#94A3B8"),
             "success": ("#052E16", "#4ADE80"),
@@ -873,6 +874,8 @@ class ControlPanel(QWidget):
         """)
         self._status_bar.setText(message)
         QCoreApplication.processEvents()
+        # Toast notification
+        ToastManager.instance().show_toast(message, level)
 
     def _on_sync_api(self) -> None:
         """Sincroniza escuelas y alumnos desde la API y los guarda en la BD."""

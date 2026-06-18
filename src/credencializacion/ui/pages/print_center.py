@@ -873,12 +873,13 @@ class PrintCenter(QWidget):
                 self._combo_printer.setCurrentIndex(idx)
 
     def set_status(self, message: str, level: str = "info") -> None:
-        """Actualiza la barra de estado.
+        """Actualiza la barra de estado y muestra un toast.
 
         Args:
             message: Texto a mostrar.
             level: 'info', 'success', 'warning', 'error'.
         """
+        from credencializacion.ui.widgets.toast import ToastManager
         colors = {
             "info": TEXT_LIGHT,
             "success": SUCCESS,
@@ -898,6 +899,8 @@ class PrintCenter(QWidget):
                 font-weight: 600;
             }}
         """)
+        # Toast notification
+        ToastManager.instance().show_toast(message, level)
 
     def show_progress(self, current: int, total: int) -> None:
         """Muestra/actualiza la barra de progreso."""

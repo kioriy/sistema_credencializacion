@@ -485,8 +485,9 @@ class TemplateManager(QWidget):
     # ── Status bar ─────────────────────────────────────────────────
 
     def set_status(self, message: str, level: str = "info") -> None:
-        """Actualiza la barra de estado."""
+        """Actualiza la barra de estado y muestra un toast."""
         from PySide6.QtCore import QCoreApplication
+        from credencializacion.ui.widgets.toast import ToastManager
         colors = {
             "info": ("#1E293B", "#94A3B8"),
             "success": ("#052E16", "#4ADE80"),
@@ -506,3 +507,5 @@ class TemplateManager(QWidget):
         """)
         self._status_bar.setText(message)
         QCoreApplication.processEvents()
+        # Toast notification
+        ToastManager.instance().show_toast(message, level)
