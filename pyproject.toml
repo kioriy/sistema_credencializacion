@@ -16,6 +16,7 @@ dependencies = [
     "gspread>=6.0",
     "google-auth>=2.0",
     "qtawesome>=1.4.2",
+    "pymupdf>=1.24",
 ]
 
 [project.optional-dependencies]
@@ -28,3 +29,8 @@ credencializacion = "credencializacion.main:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]

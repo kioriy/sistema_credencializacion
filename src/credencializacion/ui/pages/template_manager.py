@@ -484,8 +484,13 @@ class TemplateManager(QWidget):
 
     # ── Status bar ─────────────────────────────────────────────────
 
-    def set_status(self, message: str, level: str = "info") -> None:
-        """Actualiza la barra de estado y muestra un toast."""
+    def set_status(self, message: str, level: str = "info", toast: bool = True) -> None:
+        """Actualiza la barra de estado y, opcionalmente, muestra un toast.
+
+        Usar toast=False para pasos intermedios de un flujo de carga: el
+        progreso se refleja solo en el footer y se reserva el toast para el
+        resultado final.
+        """
         from PySide6.QtCore import QCoreApplication
         from credencializacion.ui.widgets.toast import ToastManager
         colors = {
@@ -507,5 +512,6 @@ class TemplateManager(QWidget):
         """)
         self._status_bar.setText(message)
         QCoreApplication.processEvents()
-        # Toast notification
-        ToastManager.instance().show_toast(message, level)
+        # Toast notification (solo resultado final)
+        if toast:
+            ToastManager.instance().show_toast(message, level)

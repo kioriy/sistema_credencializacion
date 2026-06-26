@@ -324,6 +324,9 @@ class PropertiesPanel(QWidget):
 
     property_changed = Signal(str, object)
 
+    # Mapeo índice del combo de alineación → valor almacenado en properties.
+    _ALIGN_VALUES = ["left", "center", "right"]
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
@@ -457,6 +460,18 @@ class PropertiesPanel(QWidget):
         self._combo_render_as.currentTextChanged.connect(self._on_render_as_changed)
         self._f_dyn.addRow("Formato:", self._combo_render_as)
 
+        # Alineación del texto dentro de su caja (left / center / right).
+        # El orden del combo coincide con _ALIGN_VALUES para mapear índice→valor.
+        self._combo_align = QComboBox()
+        self._combo_align.addItems(["Izquierda", "Centro", "Derecha"])
+        self._combo_align.setStyleSheet(self._input_style())
+        self._combo_align.currentIndexChanged.connect(
+            lambda i: self.property_changed.emit(
+                "alignment", self._ALIGN_VALUES[i] if 0 <= i < len(self._ALIGN_VALUES) else "left"
+            )
+        )
+        self._row_align = self._f_dyn.addRow("Alineación:", self._combo_align)
+
         self._combo_barcode_format = QComboBox()
         self._combo_barcode_format.addItems(["Code128", "EAN13"])
         self._combo_barcode_format.setStyleSheet(self._input_style())
@@ -581,11 +596,13 @@ class PropertiesPanel(QWidget):
         self._f_dyn.setRowVisible(self._combo_barcode_format, False)
         self._f_dyn.setRowVisible(self._edit_test_text, False)
         self._f_dyn.setRowVisible(self._edit_composite, False)
+        self._f_dyn.setRowVisible(self._combo_align, False)
 
         # Bloquear señales
         for widget in (self._spin_x, self._spin_y, self._spin_w, self._spin_h, 
                        self._combo_font, self._spin_font_size, self._combo_render_as,
-                       self._combo_barcode_format, self._edit_test_text, self._edit_composite):
+                       self._combo_barcode_format, self._edit_test_text, self._edit_composite,
+                       self._combo_align):
             widget.blockSignals(True)
 
         self._spin_x.setValue(element.get("x", 0))
@@ -608,6 +625,13 @@ class PropertiesPanel(QWidget):
             if render_as == "Texto":
                 self._f_dyn.setRowVisible(self._edit_test_text, True)
                 self._edit_test_text.setText(props.get("test_text", ""))
+                # Alineación solo aplica al texto renderizado como texto.
+                self._f_dyn.setRowVisible(self._combo_align, True)
+                alignment = props.get("alignment", "left")
+                try:
+                    self._combo_align.setCurrentIndex(self._ALIGN_VALUES.index(alignment))
+                except ValueError:
+                    self._combo_align.setCurrentIndex(0)
                 
             if elem_type == "composite":
                 self._f_dyn.setRowVisible(self._edit_composite, True)
@@ -615,7 +639,8 @@ class PropertiesPanel(QWidget):
 
         for widget in (self._spin_x, self._spin_y, self._spin_w, self._spin_h, 
                        self._combo_font, self._spin_font_size, self._combo_render_as,
-                       self._combo_barcode_format, self._edit_test_text, self._edit_composite):
+                       self._combo_barcode_format, self._edit_test_text, self._edit_composite,
+                       self._combo_align):
             widget.blockSignals(False)
 
     def _on_render_as_changed(self, value: str) -> None:
@@ -1026,12 +1051,16 @@ class TemplateEditor(QWidget):
         self._status_bar = bar
         return bar
 
-    def set_status(self, message: str, level: str = "info") -> None:
-        """Actualiza la barra de notificaciones con un mensaje y muestra un toast.
+    def set_status(self, message: str, level: str = "info", toast: bool = True) -> None:
+        """Actualiza la barra de notificaciones con un mensaje y, opcionalmente, muestra un toast.
 
         Args:
             message: Texto a mostrar.
             level: 'info', 'success', 'error', 'warning'.
+            toast: Si es True (por defecto) muestra una notificación toast.
+                   Usar False para pasos intermedios de un flujo de carga: el
+                   progreso se refleja solo en el footer y se reserva el toast
+                   para el resultado final.
         """
         from PySide6.QtCore import QCoreApplication
         from credencializacion.ui.widgets.toast import ToastManager
@@ -1054,8 +1083,9 @@ class TemplateEditor(QWidget):
         """)
         self._status_bar.setText(message)
         QCoreApplication.processEvents()
-        # Toast notification
-        ToastManager.instance().show_toast(message, level)
+        # Toast notification (solo resultado final)
+        if toast:
+            ToastManager.instance().show_toast(message, level)
 
     # ── Conexiones ─────────────────────────────────────────────────
 
@@ -1331,25 +1361,27 @@ class TemplateEditor(QWidget):
 
 
     def preview_template(self, cara: str | None = None) -> None:
-        """Genera un PDF de vista previa con los primeros dos registros reales.
+        """Genera la vista previa con los primeros dos registros reales.
+
+        El frente y la vuelta se generan en documentos PDF separados (uno por
+        cada cara) y se muestran en el diálogo de vista previa con pestañas.
 
         Args:
-            cara: 'frente', 'vuelta', o 'both' (frente+vuelta en 2 páginas).
-                  None usa self._current_side.
+            cara: 'frente', 'vuelta', o 'both'. Cuando es 'both' (o None) se
+                  generan ambas caras en documentos independientes.
         """
         # Sincronizar posiciones actuales del canvas con el modelo antes de renderizar
         self._sync_scene_to_model()
         from credencializacion.renderer.pdf_engine import PDFEngine
         from credencializacion.db.models import Registro
         from credencializacion.db.engine import get_session
-        from PySide6.QtGui import QDesktopServices
-        from PySide6.QtCore import QUrl
+        from credencializacion.ui.dialogs.preview_dialog import PreviewDialog
         from PySide6.QtWidgets import QMessageBox
         from pathlib import Path
         import tempfile
         import os
 
-        cara = cara or self._current_side
+        cara = cara or "both"
 
         # La plantilla debe estar guardada para conocer el cliente_id
         if not self._plantilla:
@@ -1395,17 +1427,32 @@ class TemplateEditor(QWidget):
             return
 
         engine = PDFEngine(self._plantilla)
-        fd, temp_path_str = tempfile.mkstemp(suffix=".pdf", prefix="preview_credencial_")
-        os.close(fd)
-        temp_path = Path(temp_path_str)
+
+        def _mk_temp(cara_name: str) -> Path:
+            fd, path_str = tempfile.mkstemp(
+                suffix=".pdf", prefix=f"preview_{cara_name}_"
+            )
+            os.close(fd)
+            return Path(path_str)
 
         try:
-            if cara == "both":
-                engine.render_both(registros, temp_path)
-            else:
-                engine.render(registros, cara, temp_path)
+            frentes_pdf: Path | None = None
+            vueltas_pdf: Path | None = None
 
-            QDesktopServices.openUrl(QUrl.fromLocalFile(temp_path_str))
+            if cara in ("frente", "both"):
+                frentes_pdf = _mk_temp("frente")
+                engine.render(registros, "frente", frentes_pdf)
+
+            if cara in ("vuelta", "both"):
+                vueltas_pdf = _mk_temp("vuelta")
+                engine.render(registros, "vuelta", vueltas_pdf)
+
+            dlg = PreviewDialog(
+                frentes_pdf=frentes_pdf,
+                vueltas_pdf=vueltas_pdf,
+                parent=self,
+            )
+            dlg.exec()
         except Exception as e:
             self.set_status(f"❌ Error de vista previa: {e}", "error")
 
@@ -1754,6 +1801,13 @@ class TemplateEditor(QWidget):
             data["x"] = (canvas_width - w) / 2
         elif alignment == "right":
             data["x"] = canvas_width - w
+
+        # Para texto/compuesto, alinear también el contenido dentro de la caja,
+        # no solo la posición de la caja. Así, al centrar la caja en el lienzo,
+        # el texto queda anclado al mismo eje central y los atributos de distinta
+        # longitud comparten el centro (no se anclan por el borde izquierdo).
+        if data.get("type") in ("text", "composite"):
+            data.setdefault("properties", {})["alignment"] = alignment
             
         item.set_data(data)
         self._properties_panel.update_properties(item.get_data())

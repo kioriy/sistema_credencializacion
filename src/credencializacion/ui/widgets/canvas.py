@@ -1,6 +1,6 @@
 from typing import Any
 from PySide6.QtCore import Qt, Signal, QRectF, QPointF
-from PySide6.QtGui import QColor, QFont, QPainter, QPen, QBrush, QTransform
+from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPen, QBrush, QTransform
 from PySide6.QtWidgets import (
     QGraphicsView,
     QGraphicsScene,
@@ -8,6 +8,12 @@ from PySide6.QtWidgets import (
     QGraphicsRectItem,
     QGraphicsTextItem,
     QWidget,
+)
+
+from credencializacion.renderer.text_fit import (
+    compute_anchor_x,
+    compute_start_x,
+    fit_font_size,
 )
 
 MM_TO_PX = 3.7795  # 96 DPI approx
@@ -100,6 +106,7 @@ class GraphicElement(QGraphicsItem):
 
         campo = self._data.get("campo_dato", "")
         test_text = props.get("test_text", "")
+        alignment = props.get("alignment", "left")
 
         if test_text:
             # Si hay dato de prueba, mostrarlo con el color real
@@ -115,19 +122,38 @@ class GraphicElement(QGraphicsItem):
             color = QColor("#64748B")   # gris
             texto = campo if campo else "Atributo"
 
-        font = QFont(font_family)
-        size_mm = font_size * 0.352778
-        size_px = int(size_mm * MM_TO_PX)
-        if size_px > 0:
-            font.setPixelSize(size_px)
-        else:
-            font.setPointSize(font_size)
+        # Constructor base del QFont (family, bold, italic) compartido por el
+        # medidor y por el dibujo final.
+        is_bold = props.get("font_weight", "normal") == "bold"
+        is_italic = bool(props.get("font_italic", False))
 
-        # Negrita e itálica
-        font.setBold(props.get("font_weight", "normal") == "bold")
-        font.setItalic(bool(props.get("font_italic", False)))
+        def _make_font(size_pt: float) -> QFont:
+            f = QFont(font_family)
+            f.setBold(is_bold)
+            f.setItalic(is_italic)
+            size_px = round(size_pt * 0.352778 * MM_TO_PX)
+            if size_px > 0:
+                f.setPixelSize(size_px)
+            else:
+                f.setPointSizeF(size_pt)
+            return f
 
-        # Fondo suave semi-transparente para que sea legible
+        # Medidor de ancho en px de escena, consistente con el factor de escala
+        # que ya usa el item (mismo 0.352778 * MM_TO_PX que el dibujo final).
+        def measure_width(text: str, size_pt: float) -> float:
+            return QFontMetricsF(_make_font(size_pt)).horizontalAdvance(text)
+
+        # Shrink-to-fit: reducir el tamaño (en pt) hasta que quepa en la caja.
+        effective_pt = fit_font_size(
+            measure_width,
+            texto,
+            box_width=self._rect.width(),
+            base_font_size=font_size,
+        )
+
+        font = _make_font(effective_pt)
+
+        # Fondo suave semi-transparente para que sea legible (solo placeholder).
         if not test_text:
             bg = QColor("#EFF6FF") if elem_type == "composite" else QColor("#F8FAFC")
             painter.setBrush(QBrush(bg))
@@ -136,7 +162,20 @@ class GraphicElement(QGraphicsItem):
 
         painter.setFont(font)
         painter.setPen(QPen(color))
-        painter.drawText(self._rect, Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap, texto)
+
+        # Anclaje explícito en una sola línea (sin word-wrap ni centrado del
+        # framework), calculado con la fuente efectiva.
+        fm = QFontMetricsF(font)
+        text_w = fm.horizontalAdvance(texto)
+        anchor_x = compute_anchor_x(self._rect.x(), self._rect.width(), alignment)
+        start_x = compute_start_x(anchor_x, text_w, alignment)
+
+        # Baseline vertical centrando la caja de texto según las métricas.
+        baseline_y = self._rect.y() + (
+            self._rect.height() + (fm.ascent() - fm.descent())
+        ) / 2.0
+
+        painter.drawText(QPointF(start_x, baseline_y), texto)
 
     def _paint_image(self, painter: QPainter, props: dict, label: str) -> None:
         from pathlib import Path

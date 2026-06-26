@@ -62,6 +62,9 @@ hiddenimports = [
     "PySide6.QtPrintSupport",
     "PySide6.QtSvg",
     "PySide6.QtXml",
+    # PyMuPDF (vista previa de PDFs)
+    "fitz",
+    "pymupdf",
     # Requests / urllib3
     "requests",
     "urllib3",

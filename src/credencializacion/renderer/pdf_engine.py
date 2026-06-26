@@ -27,6 +27,11 @@ from credencializacion.renderer.coordinates import (
     calculate_card_positions_from_config,
     final_coordinate,
 )
+from credencializacion.renderer.text_fit import (
+    fit_font_size,
+    compute_anchor_x,
+    compute_start_x,
+)
 from credencializacion.renderer.rotation import (
     should_rotate,
     apply_rotation,
@@ -154,54 +159,6 @@ class PDFEngine:
 
         c.save()
         logger.info("PDF generado: %s (%d registros)", output_path, len(registros))
-        return output_path
-
-    def render_both(
-        self,
-        registros: list["Registro"],
-        output_path: Path,
-    ) -> Path:
-        """Genera un PDF de 2 páginas: frentes en pág.1, vueltas en pág.2.
-
-        Página 1: frente del registro 1 en slot 1, frente del registro 2 en slot 2.
-        Página 2: vuelta del registro 1 en slot 1, vuelta del registro 2 en slot 2.
-
-        Args:
-            registros: Lista de hasta 2 registros a imprimir.
-            output_path: Ruta donde se guardará el PDF.
-
-        Returns:
-            La ruta al PDF generado.
-        """
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        c = Canvas(str(output_path), pagesize=self._page_size)
-        recursos = self.plantilla.recursos or {}
-
-        # Página 1: frentes
-        self._current_cara = "frente"
-        self._current_base_img = recursos.get("fondo_frente", "")
-        elems_frente = self.plantilla.elementos_frente
-        for slot_idx, registro in enumerate(registros):
-            if slot_idx >= len(self._card_positions):
-                break
-            self._render_card(c, registro, elems_frente, self._card_positions[slot_idx])
-        c.showPage()
-
-        # Página 2: vueltas
-        self._current_cara = "vuelta"
-        self._current_base_img = recursos.get("fondo_vuelta", "")
-        elems_vuelta = self.plantilla.elementos_vuelta
-        for slot_idx, registro in enumerate(registros):
-            if slot_idx >= len(self._card_positions):
-                break
-            self._render_card(c, registro, elems_vuelta, self._card_positions[slot_idx])
-        c.showPage()
-
-        c.save()
-        logger.info(
-            "PDF dual generado: %s (%d registros, frente+vuelta)",
-            output_path, len(registros),
-        )
         return output_path
 
     def render_queue(
@@ -435,22 +392,44 @@ class PDFEngine:
         if registered_name == "Helvetica" and variant_suffix:
             registered_name = f"Helvetica{variant_suffix}"
 
-        canvas.setFont(registered_name, font_size)
+        # Medidor de ancho de texto en puntos para la fuente registrada.
+        measure_width = lambda t, size: pdfmetrics.stringWidth(t, registered_name, size)
+
+        # Shrink-to-fit: mayor tamaño <= font_size que hace caber el texto en w.
+        effective_size = fit_font_size(
+            measure_width, text, box_width=w, base_font_size=font_size
+        )
+
+        canvas.setFont(registered_name, effective_size)
 
         # Color del texto
         color = props.get("color", "#171A2B")
         canvas.setFillColor(_hex_to_color(color))
 
-        # Alineación
+        # Anclaje horizontal explícito (mismo algoritmo que el diseñador): se
+        # resuelve el punto de inicio a partir del ancho real del texto, sin
+        # delegar el centrado al framework.
         alignment = props.get("alignment", "left")
-        text_y = y + (h - font_size) / 2  # Centrado vertical aprox.
+        text_w = pdfmetrics.stringWidth(text, registered_name, effective_size)
+        anchor_x = compute_anchor_x(x, w, alignment)
+        start_x = compute_start_x(anchor_x, text_w, alignment)
 
-        if alignment == "center":
-            canvas.drawCentredString(x + w / 2, text_y, text)
-        elif alignment == "right":
-            canvas.drawRightString(x + w, text_y, text)
-        else:
-            canvas.drawString(x, text_y, text)
+        # Centrado vertical unificado mediante ascent/descent. ReportLab usa
+        # origen abajo-izquierda y aquí `y` es el borde INFERIOR de la caja en
+        # coordenadas PDF (ver _render_element). getAscentDescent devuelve los
+        # valores ya escalados al tamaño, con descent negativo. El alto del
+        # glifo es (ascent - descent); para centrarlo dentro de [y, y+h] el
+        # baseline queda en:
+        #   baseline_y = y + (h - (ascent - descent)) / 2 - descent
+        try:
+            ascent, descent = pdfmetrics.getAscentDescent(registered_name, effective_size)
+            baseline_y = y + (h - (ascent - descent)) / 2.0 - descent
+        except Exception:
+            # Fallback si la fuente no expone métricas ascent/descent.
+            baseline_y = y + (h - effective_size) / 2.0
+
+        # Dibujar siempre desde start_x; el centrado/derecha ya está resuelto.
+        canvas.drawString(start_x, baseline_y, text)
 
     def _draw_image(
         self,

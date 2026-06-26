@@ -742,6 +742,7 @@ class PrintCenter(QWidget):
                 self.set_status(
                     f"🖨 Generando PDF de {cara}s ({len(items)} registros)...",
                     "info",
+                    toast=False,
                 )
 
                 # Generar PDF
@@ -872,12 +873,16 @@ class PrintCenter(QWidget):
             if idx >= 0:
                 self._combo_printer.setCurrentIndex(idx)
 
-    def set_status(self, message: str, level: str = "info") -> None:
-        """Actualiza la barra de estado y muestra un toast.
+    def set_status(self, message: str, level: str = "info", toast: bool = True) -> None:
+        """Actualiza la barra de estado y, opcionalmente, muestra un toast.
 
         Args:
             message: Texto a mostrar.
             level: 'info', 'success', 'warning', 'error'.
+            toast: Si es True (por defecto) muestra una notificación toast.
+                   Usar False para pasos intermedios de un flujo de carga: el
+                   progreso se refleja solo en el footer y se reserva el toast
+                   para el resultado final.
         """
         from credencializacion.ui.widgets.toast import ToastManager
         colors = {
@@ -899,8 +904,9 @@ class PrintCenter(QWidget):
                 font-weight: 600;
             }}
         """)
-        # Toast notification
-        ToastManager.instance().show_toast(message, level)
+        # Toast notification (solo resultado final)
+        if toast:
+            ToastManager.instance().show_toast(message, level)
 
     def show_progress(self, current: int, total: int) -> None:
         """Muestra/actualiza la barra de progreso."""

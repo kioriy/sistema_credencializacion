@@ -845,12 +845,16 @@ class ControlPanel(QWidget):
                 "info",
             )
 
-    def set_status(self, message: str, level: str = "info") -> None:
-        """Actualiza el footer de estado con un mensaje y muestra un toast.
+    def set_status(self, message: str, level: str = "info", toast: bool = True) -> None:
+        """Actualiza el footer de estado con un mensaje y, opcionalmente, muestra un toast.
 
         Args:
             message: Texto a mostrar.
             level: 'info', 'success', 'error', 'warning', 'sync'.
+            toast: Si es True (por defecto) muestra una notificación toast.
+                   Usar False para pasos intermedios de un flujo de carga: el
+                   progreso se refleja solo en el footer y se reserva el toast
+                   para el resultado final.
         """
         from PySide6.QtCore import QCoreApplication, QTimer
         from credencializacion.ui.widgets.toast import ToastManager
@@ -874,8 +878,9 @@ class ControlPanel(QWidget):
         """)
         self._status_bar.setText(message)
         QCoreApplication.processEvents()
-        # Toast notification
-        ToastManager.instance().show_toast(message, level)
+        # Toast notification (solo resultado final)
+        if toast:
+            ToastManager.instance().show_toast(message, level)
 
     def _on_sync_api(self) -> None:
         """Sincroniza escuelas y alumnos desde la API y los guarda en la BD."""
@@ -887,7 +892,7 @@ class ControlPanel(QWidget):
         BASE_URL = "https://app.miescuela.net"
         API_KEY = "7c9e6679-7425-40de-944b-e07fc1f90ae7"
 
-        self.set_status("⏳ Sincronizando escuelas con MiEscuela.net...", "info")
+        self.set_status("⏳ Sincronizando escuelas con MiEscuela.net...", "info", toast=False)
 
         try:
             adapter = MiEscuelaAdapter(base_url=BASE_URL, api_key=API_KEY)
@@ -896,7 +901,7 @@ class ControlPanel(QWidget):
             try:
                 schools = adapter.fetch_schools()
             except ConnectionError:
-                self.set_status("⚠ Endpoint /schools no disponible, usando fallback...", "warning")
+                self.set_status("⚠ Endpoint /schools no disponible, usando fallback...", "warning", toast=False)
                 records = adapter.fetch_records(school_id=1, status="all")
                 if records:
                     school_name = records[0].get("escuela", "Escuela 1")
@@ -917,7 +922,7 @@ class ControlPanel(QWidget):
                 self.set_status("⚠ No se encontraron escuelas asociadas a esta clave API.", "warning")
                 return
 
-            self.set_status(f"💾 Guardando {len(schools)} escuelas...", "info")
+            self.set_status(f"💾 Guardando {len(schools)} escuelas...", "info", toast=False)
 
             # ── 2. Upsert de escuelas en `clientes` ────────────────────
             cliente_map: dict[int, int] = {}  # api_id → local cliente.id
@@ -963,7 +968,7 @@ class ControlPanel(QWidget):
                     continue
 
                 self.set_status(
-                    f"⬇ Descargando alumnos de {school_data.get('name', '')}...", "info"
+                    f"⬇ Descargando alumnos de {school_data.get('name', '')}...", "info", toast=False
                 )
                 try:
                     raw_records = adapter.fetch_records(school_id=api_id, status="all")

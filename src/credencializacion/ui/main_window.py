@@ -224,7 +224,9 @@ class MainWindow(QMainWindow):
         self.btn_editor_delete.clicked.connect(self._template_editor.delete_selected)
         self.btn_editor_open.clicked.connect(self._template_editor.open_template_dialog)
         self.btn_editor_save.clicked.connect(self._template_editor.save_template)
-        self.btn_editor_preview.clicked.connect(self._template_editor.preview_template)
+        self.btn_editor_preview.clicked.connect(
+            lambda: self._template_editor.preview_template(cara="both")
+        )
         self.btn_editor_undo.clicked.connect(self._template_editor.undo)
         self.btn_editor_redo.clicked.connect(self._template_editor.redo)
 
