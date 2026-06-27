@@ -19,10 +19,88 @@ from credencializacion.db.engine import DatabaseSession
 
 
 def init_database() -> None:
-    """Crea todas las tablas si no existen y migra el esquema si hace falta."""
+    """Crea todas las tablas si no existen y migra el esquema/datos si hace falta."""
     engine = get_engine()
     Base.metadata.create_all(engine)
     _migrate_reglas_to_condiciones(engine)
+    _migrate_plantilla_base()
+
+
+def _migrate_plantilla_base() -> None:
+    """Reubica las imágenes base a la carpeta estable y remapea las rutas en la BD.
+
+    Garantiza que las imágenes base (`Plantilla.recursos['fondo_frente'/'fondo_vuelta']`)
+    sobrevivan a las actualizaciones:
+
+    1. Crea la carpeta destino estable si no existe (primera ejecución/actualización).
+    2. Siembra en ella las imágenes presentes en ubicaciones empaquetadas/legadas
+       (sin sobrescribir las ya migradas).
+    3. Por cada plantilla, si la ruta guardada apunta fuera de la carpeta estable
+       o ya no existe, copia/ubica la imagen por nombre en la carpeta estable y
+       actualiza la ruta en la BD. Es idempotente y no rompe rutas válidas.
+
+    Si una imagen referenciada no puede recuperarse, se deja la ruta tal cual
+    (no se pierde información en la BD).
+    """
+    import shutil
+    from pathlib import Path
+
+    from sqlalchemy.orm.attributes import flag_modified
+
+    from credencializacion.db.models import Plantilla
+    from credencializacion.utils.paths import (
+        get_bundled_plantilla_base,
+        get_plantilla_base_dir,
+    )
+
+    dest = get_plantilla_base_dir()  # crea el directorio si no existe
+
+    # 1-2) Sembrar imágenes desde la carpeta empaquetada/legada (sin sobrescribir).
+    bundled = get_bundled_plantilla_base()
+    if bundled is not None:
+        try:
+            if bundled.resolve() != dest.resolve():
+                for f in bundled.iterdir():
+                    if f.is_file() and not (dest / f.name).exists():
+                        try:
+                            shutil.copy2(f, dest / f.name)
+                        except Exception:  # noqa: BLE001
+                            pass
+        except Exception:  # noqa: BLE001
+            pass
+
+    # 3) Remapear rutas en Plantilla.recursos.
+    try:
+        with DatabaseSession() as session:
+            for plantilla in session.query(Plantilla).all():
+                recursos = dict(plantilla.recursos or {})
+                changed = False
+                for key in ("fondo_frente", "fondo_vuelta"):
+                    old = recursos.get(key)
+                    if not old:
+                        continue
+                    op = Path(old)
+                    # Ya apunta a la carpeta estable y existe: nada que hacer.
+                    if op.exists() and op.parent.resolve() == dest.resolve():
+                        continue
+                    target = dest / op.name
+                    # Si la imagen original aún existe fuera de dest, copiarla.
+                    if op.exists() and not target.exists():
+                        try:
+                            shutil.copy2(op, target)
+                        except Exception:  # noqa: BLE001
+                            pass
+                    # Si la imagen está disponible en dest (recién copiada o
+                    # sembrada en el paso 2), apuntar la ruta ahí.
+                    if target.exists() and str(target) != old:
+                        recursos[key] = str(target)
+                        changed = True
+                if changed:
+                    plantilla.recursos = recursos
+                    flag_modified(plantilla, "recursos")
+    except Exception:  # noqa: BLE001
+        # La migración de rutas es best-effort; no debe impedir el arranque.
+        pass
 
 
 def _migrate_reglas_to_condiciones(engine) -> None:

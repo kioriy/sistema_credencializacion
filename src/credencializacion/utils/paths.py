@@ -164,3 +164,50 @@ def get_temp_dir() -> Path:
     temp = get_data_dir() / "temp"
     temp.mkdir(parents=True, exist_ok=True)
     return temp
+
+
+def get_plantilla_base_dir() -> Path:
+    """Directorio donde se guardan las imágenes base de las plantillas.
+
+    - Desarrollo: ``<raíz del proyecto>/plantilla_base`` (comportamiento previo).
+    - Empaquetada: dentro de la carpeta de datos estable del usuario, fuera del
+      directorio de la app, para que las actualizaciones no borren las imágenes
+      base subidas por el usuario.
+
+    Crea el directorio si no existe (primera ejecución/actualización).
+    """
+    if _is_frozen():
+        d = get_data_dir() / "plantilla_base"
+    else:
+        d = get_app_root() / "plantilla_base"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def get_bundled_plantilla_base() -> Path | None:
+    """Carpeta ``plantilla_base`` empaquetada/legada (solo lectura), si existe.
+
+    Se usa para sembrar las imágenes base por defecto en la carpeta de datos del
+    usuario y para recuperar imágenes tras mover la ubicación. Devuelve ``None``
+    si no se encuentra ninguna ubicación candidata.
+    """
+    candidates: list[Path] = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.append(Path(meipass) / "plantilla_base")
+    try:
+        exe_dir = Path(sys.executable).resolve().parent
+        candidates.append(exe_dir / "plantilla_base")
+        candidates.append(exe_dir / "_internal" / "plantilla_base")
+    except Exception:  # noqa: BLE001
+        pass
+    candidates.append(get_app_root() / "plantilla_base")
+    candidates.append(Path.cwd() / "plantilla_base")
+
+    for c in candidates:
+        try:
+            if c.exists():
+                return c
+        except Exception:  # noqa: BLE001
+            continue
+    return None

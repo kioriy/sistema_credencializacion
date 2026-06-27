@@ -1281,16 +1281,18 @@ class TemplateEditor(QWidget):
         self._create_designs_from_images(side, paths)
 
     def _copy_to_plantilla_base(self, path_str: str) -> "Path | None":
-        """Copia una imagen a ``plantilla_base/`` y devuelve su ruta destino.
+        """Copia una imagen a la carpeta de imágenes base y devuelve su ruta destino.
 
-        Devuelve ``None`` si la copia falla (informando el error en el estado).
+        El destino es la carpeta estable del usuario (`get_plantilla_base_dir`),
+        fuera del directorio de la app, de modo que las actualizaciones no borren
+        las imágenes base. Devuelve ``None`` si la copia falla.
         """
         from pathlib import Path
         import shutil
+        from credencializacion.utils.paths import get_plantilla_base_dir
 
         src = Path(path_str)
-        project_root = Path(__file__).parent.parent.parent.parent.parent
-        dest_folder = project_root / "plantilla_base"
+        dest_folder = get_plantilla_base_dir()  # crea el directorio si no existe
         dest_folder.mkdir(parents=True, exist_ok=True)
         dest = dest_folder / src.name
 
