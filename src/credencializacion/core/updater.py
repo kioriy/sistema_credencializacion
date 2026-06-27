@@ -34,7 +34,7 @@ GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 ASSET_NAME = "CredencializacionApp-Windows.zip"
 
 # Versión actual de la app (sincronizada con pyproject.toml por release.sh)
-APP_VERSION = "0.1.3"
+APP_VERSION = "0.1.4"
 
 
 # ── Consulta a GitHub ─────────────────────────────────────────────────────────
