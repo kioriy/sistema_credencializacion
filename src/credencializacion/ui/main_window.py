@@ -50,7 +50,14 @@ class MainWindow(QMainWindow):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle(self.WINDOW_TITLE)
+        # Mostrar la versión en la barra de título como refuerzo visual de la
+        # actualización (la versión es la fuente única en updater.APP_VERSION).
+        try:
+            from credencializacion.core.updater import APP_VERSION
+            title = f"{self.WINDOW_TITLE} — v{APP_VERSION}"
+        except Exception:
+            title = self.WINDOW_TITLE
+        self.setWindowTitle(title)
         self.setMinimumSize(self.MIN_WIDTH, self.MIN_HEIGHT)
         self.resize(1280, 800)
 
