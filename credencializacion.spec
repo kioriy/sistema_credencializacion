@@ -41,7 +41,13 @@ hiddenimports = [
     "reportlab.graphics.barcode.common",
     "reportlab.graphics.barcode.code128",
     "reportlab.graphics.barcode.code39",
+    "reportlab.graphics.barcode.code93",
     "reportlab.graphics.barcode.qr",
+    "reportlab.graphics.barcode.eanbc",
+    "reportlab.graphics.barcode.ecc200datamatrix",
+    "reportlab.graphics.barcode.usps",
+    "reportlab.graphics.barcode.usps4s",
+    "reportlab.graphics.barcode.widgets",
     "reportlab.pdfbase.pdfmetrics",
     "reportlab.pdfbase.ttfonts",
     "reportlab.platypus",
@@ -103,7 +109,7 @@ hiddenimports = [
     "credencializacion.core.settings",
     "credencializacion.utils.qr",
     "credencializacion.utils.fonts",
-] + collect_submodules("credencializacion")
+] + collect_submodules("credencializacion") + collect_submodules("reportlab")
 
 # ── Análisis ─────────────────────────────────────────────────────────────────
 a = Analysis(

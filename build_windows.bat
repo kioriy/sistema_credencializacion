@@ -40,7 +40,7 @@ python -m pip install --upgrade pip --quiet
 echo [3/5] Instalando dependencias del proyecto...
 pip install PySide6>=6.7 SQLAlchemy>=2.0 reportlab>=4.0 thefuzz[speedup] ^
     requests>=2.31 openpyxl>=3.1 "qrcode[pil]>=7.4" Pillow>=10.0 ^
-    gspread>=6.0 google-auth>=2.0 qtawesome>=1.4.2 --quiet
+    gspread>=6.0 google-auth>=2.0 qtawesome>=1.4.2 PyMuPDF>=1.24 --quiet
 
 echo [4/5] Instalando PyInstaller...
 pip install pyinstaller --quiet

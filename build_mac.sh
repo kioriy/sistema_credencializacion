@@ -35,7 +35,7 @@ echo "[2/4] Instalando dependencias..."
 pip install -q -e ".[dev]" 2>/dev/null || pip install -q \
     "PySide6>=6.7" "SQLAlchemy>=2.0" "reportlab>=4.0" "thefuzz[speedup]" \
     "requests>=2.31" "openpyxl>=3.1" "qrcode[pil]>=7.4" "Pillow>=10.0" \
-    "gspread>=6.0" "google-auth>=2.0" "qtawesome>=1.4.2"
+    "gspread>=6.0" "google-auth>=2.0" "qtawesome>=1.4.2" "PyMuPDF>=1.24"
 
 echo "[3/4] Instalando PyInstaller..."
 pip install -q pyinstaller

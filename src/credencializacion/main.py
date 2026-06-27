@@ -52,9 +52,9 @@ def main() -> None:
 
     # 4. Verificar actualizaciones en segundo plano (solo en ejecutable compilado)
     try:
-        from credencializacion.core.updater import check_for_updates, UpdateEventFilter
-        UpdateEventFilter(app)          # Instala filtro de eventos para recibir notificación
-        check_for_updates(window)       # Lanza hilo de verificación
+        from credencializacion.core.updater import check_for_updates, init_updater
+        init_updater(window)            # Crea el puente de señales en el hilo principal
+        check_for_updates(window)       # Lanza hilo de verificación silenciosa
     except Exception as e:
         logger.debug("Verificación de actualizaciones no disponible: %s", e)
 

@@ -51,6 +51,7 @@ jobs:
             "gspread>=6.0" `
             "google-auth>=2.0" `
             "qtawesome>=1.4.2" `
+            "PyMuPDF>=1.24" `
             "pyinstaller>=6.0"
 
       # ── 4. Compilar con PyInstaller ──────────────────────────────────────

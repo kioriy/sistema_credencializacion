@@ -1249,17 +1249,26 @@ class TemplateEditor(QWidget):
         La imagen se muestra como BackgroundItem en z_order=−1 para estar
         detrás de todos los elementos de diseño.
         """
-        from credencializacion.ui.widgets.canvas import GraphicElement
+        from credencializacion.ui.widgets.canvas import GraphicElement, MM_TO_PX
         from pathlib import Path
 
         scene = self._scene_frente if side == "frente" else self._scene_vuelta
 
-        # Obtener dimensiones del lienzo en mm
-        plantilla_ancho = 8.5  # cm
-        plantilla_alto = 5.4   # cm
-        if self._plantilla:
+        # Obtener dimensiones del lienzo en cm a partir del sceneRect actual,
+        # que es la fuente de verdad de la orientación vigente (vertical u
+        # horizontal). Así la imagen base respeta la orientación del lienzo en
+        # lugar de forzar un tamaño horizontal por defecto.
+        rect = scene.sceneRect()
+        if rect.width() > 0 and rect.height() > 0:
+            plantilla_ancho = rect.width() / (10 * MM_TO_PX)   # px → cm
+            plantilla_alto = rect.height() / (10 * MM_TO_PX)
+        elif self._plantilla:
             plantilla_ancho = self._plantilla.ancho
             plantilla_alto = self._plantilla.alto
+        elif getattr(self, "_local_orientation", "horizontal") == "vertical":
+            plantilla_ancho, plantilla_alto = 5.4, 8.5
+        else:
+            plantilla_ancho, plantilla_alto = 8.5, 5.4
 
         # Eliminar cualquier fondo base anterior
         items_to_remove = [
@@ -1317,6 +1326,7 @@ class TemplateEditor(QWidget):
                         orientacion=self._local_orientation,
                         ancho=8.5 if self._local_orientation == "horizontal" else 5.4,
                         alto=5.4 if self._local_orientation == "horizontal" else 8.5,
+                        recursos=dict(getattr(self, "_local_recursos", {}) or {}),
                         posiciones_hoja={
                             "page_size": "custom_297_320",
                             "cards_per_page": 2,
@@ -1339,8 +1349,13 @@ class TemplateEditor(QWidget):
                 if plantilla_db:
                     plantilla_db.elementos_frente = list(self._plantilla.elementos_frente)
                     plantilla_db.elementos_vuelta = list(self._plantilla.elementos_vuelta)
+                    plantilla_db.orientacion = self._plantilla.orientacion
+                    plantilla_db.ancho = self._plantilla.ancho
+                    plantilla_db.alto = self._plantilla.alto
+                    plantilla_db.recursos = dict(self._plantilla.recursos or {})
                     flag_modified(plantilla_db, "elementos_frente")
                     flag_modified(plantilla_db, "elementos_vuelta")
+                    flag_modified(plantilla_db, "recursos")
                     session.commit()
                     self.set_status("✅ Plantilla actualizada.", "success")
 
