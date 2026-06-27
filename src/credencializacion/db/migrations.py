@@ -2,15 +2,109 @@
 Creación inicial de tablas y datos semilla.
 Ejecuta create_all para generar el esquema SQLite.
 """
+from sqlalchemy import inspect
+
 from credencializacion.db.engine import get_engine
-from credencializacion.db.models import Base, Cliente, Plantilla, ColaImpresion, ItemCola
+from credencializacion.db.models import (
+    Base,
+    Cliente,
+    Plantilla,
+    ColaImpresion,
+    ItemCola,
+    ConfiguracionMultiplantillaje,
+    ReglaAsignacion,
+    CondicionAsignacion,
+)
 from credencializacion.db.engine import DatabaseSession
 
 
 def init_database() -> None:
-    """Crea todas las tablas si no existen."""
+    """Crea todas las tablas si no existen y migra el esquema si hace falta."""
     engine = get_engine()
     Base.metadata.create_all(engine)
+    _migrate_reglas_to_condiciones(engine)
+
+
+def _migrate_reglas_to_condiciones(engine) -> None:
+    """Migra el esquema legado de `reglas_asignacion` a condiciones compuestas.
+
+    En instalaciones previas, `reglas_asignacion` tenía columnas ``atributo`` y
+    ``valor`` (una sola condición por regla). El nuevo modelo mueve esas columnas
+    a la tabla hija `condiciones_asignacion` (1:N, AND). Este paso es idempotente:
+    solo actúa si la tabla `reglas_asignacion` aún conserva las columnas legadas.
+
+    Por cada regla existente crea una `CondicionAsignacion` equivalente
+    (``atributo``, ``valor``, ``orden=0``) —es decir, cada regla simple se
+    convierte en una regla con una única condición, preservando la semántica
+    anterior— y luego reconstruye `reglas_asignacion` sin las columnas legadas
+    (patrón de table-rebuild de SQLite). Se conservan los ``id`` para no romper
+    las FKs de `condiciones_asignacion`.
+    """
+    inspector = inspect(engine)
+    if "reglas_asignacion" not in inspector.get_table_names():
+        return
+
+    columnas = {col["name"] for col in inspector.get_columns("reglas_asignacion")}
+    if "atributo" not in columnas and "valor" not in columnas:
+        # Ya migrado: nada que hacer (idempotente).
+        return
+
+    # El rebuild de tabla en SQLite requiere desactivar las FKs temporalmente y
+    # ejecutar el DDL en una transacción. Se usa la conexión DBAPI cruda
+    # (sqlite3) para controlar el PRAGMA fuera de transacción, ya que SQLAlchemy
+    # auto-inicia una transacción al ejecutar sentencias.
+    raw = engine.raw_connection()
+    try:
+        cur = raw.cursor()
+        cur.execute("PRAGMA foreign_keys=OFF")
+        cur.execute("BEGIN")
+        try:
+            # 1) Backfill: cada regla legada -> una condición (orden 0). Solo si
+            #    aún no existe una condición para esa regla (idempotencia extra).
+            cur.execute(
+                "INSERT INTO condiciones_asignacion "
+                "(regla_id, atributo, valor, orden) "
+                "SELECT r.id, r.atributo, r.valor, 0 "
+                "FROM reglas_asignacion AS r "
+                "WHERE NOT EXISTS ("
+                "  SELECT 1 FROM condiciones_asignacion AS c "
+                "  WHERE c.regla_id = r.id"
+                ")"
+            )
+
+            # 2) Rebuild de `reglas_asignacion` sin las columnas legadas,
+            #    conservando id/configuracion_id/plantilla_destino_id/orden.
+            cur.execute(
+                "CREATE TABLE reglas_asignacion_new ("
+                "  id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,"
+                "  configuracion_id INTEGER NOT NULL,"
+                "  plantilla_destino_id INTEGER NOT NULL,"
+                "  orden INTEGER NOT NULL DEFAULT 0,"
+                "  FOREIGN KEY(configuracion_id) REFERENCES "
+                "    configuraciones_multiplantillaje(id) ON DELETE CASCADE,"
+                "  FOREIGN KEY(plantilla_destino_id) REFERENCES "
+                "    plantillas(id) ON DELETE CASCADE"
+                ")"
+            )
+            cur.execute(
+                "INSERT INTO reglas_asignacion_new "
+                "(id, configuracion_id, plantilla_destino_id, orden) "
+                "SELECT id, configuracion_id, plantilla_destino_id, orden "
+                "FROM reglas_asignacion"
+            )
+            cur.execute("DROP TABLE reglas_asignacion")
+            cur.execute(
+                "ALTER TABLE reglas_asignacion_new RENAME TO reglas_asignacion"
+            )
+            raw.commit()
+        except Exception:
+            raw.rollback()
+            raise
+        finally:
+            cur.execute("PRAGMA foreign_keys=ON")
+            cur.close()
+    finally:
+        raw.close()
 
 
 def seed_default_data() -> None:

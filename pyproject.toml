@@ -33,4 +33,5 @@ where = ["src"]
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
+    "hypothesis>=6.155.7",
 ]

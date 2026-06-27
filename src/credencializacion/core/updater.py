@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import platform
+import shutil
 import subprocess
 import sys
 import zipfile
@@ -35,6 +36,46 @@ ASSET_NAME = "CredencializacionApp-Windows.zip"
 
 # Versión actual de la app (sincronizada con pyproject.toml por release.sh)
 APP_VERSION = "0.1.4"
+
+
+# ── Marca de intento de actualización (rompe el bucle de re-prompt) ───────────
+def _attempt_marker_path() -> Path:
+    """Ruta del archivo que registra la última versión que se intentó instalar.
+
+    Vive en el directorio de datos del usuario (estable, fuera de la app), de
+    modo que persiste entre reinicios y no se ve afectado por la actualización.
+    """
+    from credencializacion.utils.paths import get_data_dir
+
+    return get_data_dir() / "update_attempt.json"
+
+
+def _read_attempted_version() -> Optional[str]:
+    """Devuelve la última versión cuya instalación se intentó, o None."""
+    try:
+        import json
+
+        path = _attempt_marker_path()
+        if not path.exists():
+            return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data.get("attempted_version")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _write_attempted_version(tag: str) -> None:
+    """Registra la versión cuya instalación se está intentando."""
+    try:
+        import json
+        import time
+
+        _attempt_marker_path().write_text(
+            json.dumps({"attempted_version": tag, "ts": time.time()}),
+            encoding="utf-8",
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.debug("No se pudo escribir la marca de actualización: %s", e)
 
 
 # ── Consulta a GitHub ─────────────────────────────────────────────────────────
@@ -109,36 +150,55 @@ def can_self_update() -> bool:
 
 
 def apply_update(zip_path: Path) -> bool:
-    """Extrae el zip en el directorio del ejecutable actual.
+    """Extrae el zip en el directorio del ejecutable actual (Windows).
 
-    En Windows extrae y reemplaza archivos. El propio .exe se reemplaza
-    en el siguiente reinicio con un script batch auxiliar.
+    El propio .exe se reemplaza tras cerrar la app mediante un script batch
+    auxiliar. La carpeta de datos del usuario vive fuera del directorio de la
+    app (ver ``utils.paths.get_data_dir``), por lo que la actualización **no
+    toca la base de datos**; aun así se excluye cualquier carpeta ``data`` del
+    copiado como defensa en profundidad.
 
     Returns:
-        True si la extracción fue exitosa.
+        True si la extracción y el lanzamiento del script fueron exitosos.
     """
     exe_dir = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path.cwd()
 
     try:
+        tmp_dir = exe_dir.parent / "_update_tmp"
+        if tmp_dir.exists():
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        tmp_dir.mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(zip_path, "r") as zf:
-            # Extraer a una carpeta temporal contigua
-            tmp_dir = exe_dir.parent / "_update_tmp"
-            tmp_dir.mkdir(exist_ok=True)
             zf.extractall(tmp_dir)
 
-        # Crear script .bat que reemplaza la carpeta y relanza la app
+        # Detectar dinámicamente la carpeta raíz extraída (no asumir un nombre
+        # fijo): si el zip contiene una única carpeta de nivel superior, esa es
+        # el origen; si no, se usa la carpeta temporal completa. Evita el fallo
+        # silencioso de xcopy cuando el nombre de la carpeta no coincide.
+        entries = [p for p in tmp_dir.iterdir()]
+        subdirs = [p for p in entries if p.is_dir()]
+        if len(subdirs) == 1 and len(entries) == 1:
+            source_dir = subdirs[0]
+        else:
+            source_dir = tmp_dir
+
+        # Archivo de exclusión para xcopy: no copiar la carpeta de datos.
+        exclude_file = exe_dir.parent / "_update_exclude.txt"
+        exclude_file.write_text("\\data\\\n", encoding="utf-8")
+
+        # Script .bat que reemplaza los archivos de la app y la relanza.
         bat = exe_dir.parent / "_apply_update.bat"
         bat.write_text(
-            f"@echo off\n"
-            f"timeout /t 2 /nobreak >nul\n"
-            f'xcopy /E /Y /I "{tmp_dir}\\CredencializacionApp" "{exe_dir}"\n'
-            f'rmdir /S /Q "{tmp_dir}"\n'
-            f'start "" "{exe_dir}\\CredencializacionApp.exe"\n'
-            f"del \"%~f0\"\n",
+            "@echo off\r\n"
+            "timeout /t 3 /nobreak >nul\r\n"
+            f'xcopy /E /Y /I /EXCLUDE:"{exclude_file}" "{source_dir}\\*" "{exe_dir}"\r\n'
+            f'rmdir /S /Q "{tmp_dir}"\r\n'
+            f'del /Q "{exclude_file}"\r\n'
+            f'start "" "{exe_dir}\\CredencializacionApp.exe"\r\n'
+            'del "%~f0"\r\n',
             encoding="utf-8",
         )
 
-        # Ejecutar el bat y cerrar la app actual
         subprocess.Popen(["cmd", "/c", str(bat)], shell=False)
         return True
     except Exception as e:
@@ -169,7 +229,15 @@ class _UpdaterBridge(QObject):
         self._parent_widget = widget
 
     def _on_update_available(self, version: str, asset_url: str, release_url: str) -> None:
-        _show_update_dialog(version, asset_url, release_url, self._parent_widget)
+        global _dialog_open
+        if _dialog_open:
+            # Ya hay un diálogo de actualización abierto: no abrir otro.
+            return
+        _dialog_open = True
+        try:
+            _show_update_dialog(version, asset_url, release_url, self._parent_widget)
+        finally:
+            _dialog_open = False
 
     def _on_feedback(self, message: str, level: str) -> None:
         from credencializacion.ui.widgets.toast import ToastManager
@@ -178,6 +246,9 @@ class _UpdaterBridge(QObject):
 
 # Referencia global para mantener vivo el puente durante toda la sesión.
 _bridge: Optional[_UpdaterBridge] = None
+# Evita abrir múltiples diálogos de actualización simultáneos (bucle dentro de
+# una misma sesión).
+_dialog_open: bool = False
 
 
 def init_updater(parent=None) -> _UpdaterBridge:
@@ -239,6 +310,20 @@ def check_for_updates(parent=None, manual: bool = False) -> None:
                 bridge.feedback.emit(
                     f"Ya tienes la última versión (v{APP_VERSION}).", "success"
                 )
+            return
+
+        # Rompe el bucle de re-prompt entre reinicios: si ya se intentó instalar
+        # esta misma versión y la app sigue ejecutando una anterior (la
+        # actualización no completó), NO se vuelve a abrir automáticamente el
+        # diálogo. El usuario puede reintentar manualmente. (Solo aplica a la
+        # verificación automática de arranque.)
+        if not manual and _read_attempted_version() == tag:
+            logger.warning(
+                "Ya se intentó actualizar a %s y la app sigue en v%s; se omite "
+                "el aviso automático para evitar un bucle. Usa el botón de "
+                "actualización para reintentar.",
+                tag, APP_VERSION,
+            )
             return
 
         # Hay una versión más reciente — buscar el asset descargable
@@ -355,6 +440,10 @@ def _show_update_dialog(version: str, asset_url: str, release_url: str, parent) 
             ok = download_update(asset_url, tmp, _progress)
             if ok:
                 lbl_status.setText("Aplicando actualización…")
+                # Registrar el intento ANTES de aplicar: si el relanzamiento no
+                # completa la actualización, el arranque siguiente no volverá a
+                # abrir el diálogo automáticamente (evita el bucle).
+                _write_attempted_version(version)
                 if apply_update(tmp):
                     QApplication.quit()
                 else:

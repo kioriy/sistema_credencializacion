@@ -184,6 +184,9 @@ class MainWindow(QMainWindow):
 
         self.btn_editor_open = self._make_toolbar_btn("fa5s.folder-open", "Abrir", primary=False)
         tb_ed_layout.addWidget(self.btn_editor_open)
+
+        self.btn_editor_new = self._make_toolbar_btn("fa5s.file", "Nuevo", primary=False)
+        tb_ed_layout.addWidget(self.btn_editor_new)
         
         self.btn_editor_preview = self._make_toolbar_btn("fa5s.eye", "Vista Previa", primary=False)
         tb_ed_layout.addWidget(self.btn_editor_preview)
@@ -223,6 +226,7 @@ class MainWindow(QMainWindow):
         self.btn_editor_align_right.clicked.connect(lambda: self._template_editor.align_selected("right"))
         self.btn_editor_delete.clicked.connect(self._template_editor.delete_selected)
         self.btn_editor_open.clicked.connect(self._template_editor.open_template_dialog)
+        self.btn_editor_new.clicked.connect(self._template_editor.new_template)
         self.btn_editor_save.clicked.connect(self._template_editor.save_template)
         self.btn_editor_preview.clicked.connect(
             lambda: self._template_editor.preview_template(cara="both")

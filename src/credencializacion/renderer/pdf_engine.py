@@ -185,6 +185,28 @@ class PDFEngine:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         c = Canvas(str(output_path), pagesize=self._page_size)
 
+        # Req 5.9: omitir los ítems cuya plantilla asignada no puede cargarse
+        # (imagen base de la cara no disponible), registrando un error que
+        # identifica el registro y la plantilla afectados y continuando con el
+        # resto de la cola. Se filtra antes de paginar para no descuadrar los
+        # slots de cada página.
+        renderable_items: list[tuple["Registro", "Plantilla"]] = []
+        for registro, plantilla in items:
+            if not self._can_load_template_resources(plantilla, cara):
+                logger.error(
+                    "Omitiendo registro id=%s ('%s'): la plantilla id=%s ('%s') "
+                    "no pudo cargarse para la cara '%s' (imagen base no disponible)",
+                    getattr(registro, "id", "?"),
+                    getattr(registro, "enrollment_code", "") or "sin código",
+                    getattr(plantilla, "id", "?"),
+                    getattr(plantilla, "nombre", "?"),
+                    cara,
+                )
+                continue
+            renderable_items.append((registro, plantilla))
+
+        items = renderable_items
+
         for page_idx in range(0, len(items), self._cards_per_page):
             page_items = items[page_idx : page_idx + self._cards_per_page]
 
@@ -214,6 +236,33 @@ class PDFEngine:
             cara, output_path, len(items),
         )
         return output_path
+
+
+    def _can_load_template_resources(
+        self, plantilla: "Plantilla", cara: str
+    ) -> bool:
+        """Indica si los recursos de la plantilla para una cara son cargables.
+
+        Req 5.9: una plantilla no puede cargarse cuando referencia una imagen
+        base (``recursos['fondo_frente']`` / ``recursos['fondo_vuelta']``) que
+        no existe en disco. Una plantilla sin imagen base configurada (cadena
+        vacía) se considera cargable: se renderiza solo con sus elementos,
+        conservando el comportamiento actual.
+
+        Args:
+            plantilla: Plantilla asignada al registro.
+            cara: 'frente' o 'vuelta'.
+
+        Returns:
+            True si la plantilla puede cargarse; False si su imagen base
+            referenciada no está disponible.
+        """
+        recursos = plantilla.recursos or {}
+        base_key = "fondo_frente" if cara == "frente" else "fondo_vuelta"
+        base_img = recursos.get(base_key, "")
+        if base_img and not Path(base_img).exists():
+            return False
+        return True
 
 
     def _render_card(

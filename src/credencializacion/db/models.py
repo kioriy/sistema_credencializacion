@@ -347,3 +347,121 @@ class ItemCola(Base):
             f"<ItemCola(id={self.id}, cola={self.cola_id}, "
             f"orden={self.orden}, registro={self.registro_id})>"
         )
+
+
+class ConfiguracionMultiplantillaje(Base):
+    """Configuración de multiplantillaje por Cliente (Decisión 1).
+
+    Agrupa las reglas de asignación y referencia la plantilla por defecto.
+    Relación 1:1 con Cliente: una configuración por cliente como máximo
+    (Req 4.1 — guardar reemplaza la previa).
+    """
+    __tablename__ = "configuraciones_multiplantillaje"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    cliente_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("clientes.id", ondelete="CASCADE"),
+        nullable=False, unique=True,  # 1 config por cliente
+    )
+    # Nullable para soportar Req 5.8 (sin default). El dominio exige default,
+    # pero la columna lo admite para no bloquear estados de error controlados.
+    plantilla_default_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("plantillas.id", ondelete="SET NULL"), nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    # Relaciones
+    cliente: Mapped["Cliente"] = relationship()
+    plantilla_default: Mapped["Plantilla | None"] = relationship(
+        foreign_keys=[plantilla_default_id]
+    )
+    reglas: Mapped[list["ReglaAsignacion"]] = relationship(
+        back_populates="configuracion",
+        cascade="all, delete-orphan",
+        order_by="ReglaAsignacion.orden",
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<ConfiguracionMultiplantillaje(id={self.id}, "
+            f"cliente_id={self.cliente_id}, "
+            f"plantilla_default_id={self.plantilla_default_id})>"
+        )
+
+
+class ReglaAsignacion(Base):
+    """Regla con destino, compuesta por una o más Condicion_Asignacion en AND (Req 3.1).
+
+    `atributo`/`valor` ya NO viven aquí: se trasladaron a `CondicionAsignacion`.
+    Una regla coincide solo si TODAS sus condiciones se cumplen. El campo `orden`
+    define la precedencia de evaluación de la regla (Req 5.5).
+    """
+    __tablename__ = "reglas_asignacion"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    configuracion_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("configuraciones_multiplantillaje.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    plantilla_destino_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("plantillas.id", ondelete="CASCADE"), nullable=False,
+    )
+    orden: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    # Relaciones
+    configuracion: Mapped["ConfiguracionMultiplantillaje"] = relationship(
+        back_populates="reglas"
+    )
+    plantilla_destino: Mapped["Plantilla"] = relationship(
+        foreign_keys=[plantilla_destino_id]
+    )
+    # Condiciones en conjunción (AND). Ordenadas por `orden`; borrado en cascada
+    # para que al eliminar una regla desaparezcan sus condiciones (Req 3.3).
+    condiciones: Mapped[list["CondicionAsignacion"]] = relationship(
+        back_populates="regla",
+        cascade="all, delete-orphan",
+        order_by="CondicionAsignacion.orden",
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<ReglaAsignacion(id={self.id}, "
+            f"configuracion_id={self.configuracion_id}, "
+            f"plantilla_destino_id={self.plantilla_destino_id}, "
+            f"orden={self.orden})>"
+        )
+
+
+class CondicionAsignacion(Base):
+    """Condición 'atributo igual a valor' de una Regla_Asignacion (Req 3.1).
+
+    Una Regla_Asignacion coincide únicamente cuando TODAS sus condiciones se
+    cumplen (conjunción lógica Y). `orden` ordena las condiciones dentro de la
+    regla para una presentación/serialización estable.
+    """
+    __tablename__ = "condiciones_asignacion"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    regla_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("reglas_asignacion.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    atributo: Mapped[str] = mapped_column(String(100), nullable=False)
+    valor: Mapped[str] = mapped_column(String(255), nullable=False)
+    orden: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    regla: Mapped["ReglaAsignacion"] = relationship(back_populates="condiciones")
+
+    def __repr__(self) -> str:
+        return (
+            f"<CondicionAsignacion(id={self.id}, regla_id={self.regla_id}, "
+            f"atributo='{self.atributo}', valor='{self.valor}', "
+            f"orden={self.orden})>"
+        )

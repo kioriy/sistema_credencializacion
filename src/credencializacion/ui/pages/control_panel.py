@@ -6,6 +6,7 @@ y paginación. Permite seleccionar registros para impresión/vista previa.
 """
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 from PySide6.QtCore import Qt, Signal, QSize, QThread, Slot, QUrl
 from PySide6.QtGui import QFont, QCursor, QIcon, QPixmap, QPainter, QPainterPath, QColor
@@ -34,6 +35,8 @@ from credencializacion.ui.widgets.print_queue import PrintQueuePanel
 
 if TYPE_CHECKING:
     from credencializacion.db.models import Registro
+
+logger = logging.getLogger(__name__)
 
 # ── Paleta de colores ──────────────────────────────────────────────────
 PRIMARY = "#FB5252"
@@ -670,6 +673,7 @@ class ControlPanel(QWidget):
         # Crear en BD
         from credencializacion.db.engine import DatabaseSession
         from credencializacion.db.models import ColaImpresion, ItemCola
+        from credencializacion.db.repositories import MultiTemplateRepository
 
         try:
             with DatabaseSession() as session:
@@ -682,14 +686,45 @@ class ControlPanel(QWidget):
                 session.add(cola)
                 session.flush()
 
+                # Resolver la configuración de multiplantillaje del cliente. Los
+                # registros de la cola pertenecen a un mismo cliente; se toma el
+                # `cliente_id` del primer registro disponible (Req 5.5, 5.7).
+                cliente_id = next(
+                    (r.cliente_id for r in queue_records if r.cliente_id is not None),
+                    None,
+                )
+                config_dto = (
+                    MultiTemplateRepository.get_config(session, cliente_id)
+                    if cliente_id is not None
+                    else None
+                )
+
+                items_creados = 0
                 for orden, reg in enumerate(queue_records, start=1):
+                    if config_dto is None:
+                        # Sin configuración: comportamiento actual, la plantilla
+                        # seleccionada se usa para todos los registros (Req 5.7).
+                        item_plantilla_id = plantilla_id
+                    else:
+                        # Con configuración: resolver la plantilla por registro
+                        # (Req 5.5). Un resultado None indica que el registro debe
+                        # omitirse (Req 5.8/8.4).
+                        item_plantilla_id = self._resolve_plantilla_id(
+                            reg, config_dto, plantilla_id
+                        )
+                        if item_plantilla_id is None:
+                            continue
+
                     item = ItemCola(
                         cola_id=cola.id,
                         registro_id=reg.id,
-                        plantilla_id=plantilla_id,
+                        plantilla_id=item_plantilla_id,
                         orden=orden,
                     )
                     session.add(item)
+                    items_creados += 1
+
+                cola.total_registros = items_creados
 
                 session.commit()
                 self.set_status(f"✅ Cola de {tipo} guardada exitosamente", "success")
@@ -704,6 +739,31 @@ class ControlPanel(QWidget):
 
         except Exception as e:
             self.set_status(f"❌ Error al guardar cola: {e}", "error")
+
+    def _resolve_plantilla_id(self, registro, config_dto, plantilla_cola_id):
+        """Resuelve el `plantilla_id` de un registro vía el Motor_Asignacion.
+
+        Wrapper de UI sobre `resolve_template`: traduce el `AssignmentResult` a
+        un `plantilla_id` (o ``None``) y emite el log correspondiente
+        identificando el registro afectado.
+
+        - status ``"error"``: registra un error y devuelve ``None`` para que el
+          registro se omita (no se crea `ItemCola`, Req 5.8/8.4).
+        - status ``"fallback_cola"`` / ``"warning_missing"``: registra una
+          advertencia y devuelve la plantilla resuelta (Req 8.3, 8.6).
+        - resto de estados: devuelve la plantilla resuelta sin log (Req 5.5).
+        """
+        from credencializacion.services.template_assignment import resolve_template
+
+        result = resolve_template(
+            registro.datos or {}, config_dto, plantilla_cola_id
+        )
+        if result.status == "error":
+            logger.error(result.message)
+            return None
+        if result.status in ("fallback_cola", "warning_missing"):
+            logger.warning(result.message)
+        return result.plantilla_id
 
     def _on_search_changed(self, text: str) -> None:
         """Filtra registros por texto de búsqueda en cualquier campo."""
@@ -799,21 +859,27 @@ class ControlPanel(QWidget):
         self._pill_pending.setText(f"📝 Pendientes: {pending}")
 
     def _load_system_printers(self) -> None:
-        """Carga las impresoras del sistema al combobox."""
-        try:
-            from PySide6.QtPrintSupport import QPrinterInfo
-            printers = QPrinterInfo.availablePrinters()
-            self._combo_printers.clear()
-            for printer in printers:
-                name = printer.printerName()
-                if printer.isDefault():
-                    name += " (predeterminada)"
-                self._combo_printers.addItem(name)
-            if not printers:
-                self._combo_printers.addItem("No se encontraron impresoras")
+        """Carga las impresoras del sistema al combobox (fuente unificada)."""
+        from credencializacion.core.printer import (
+            get_default_printer,
+            get_system_printers,
+        )
+
+        printers = get_system_printers()
+        default = get_default_printer()
+
+        self._combo_printers.clear()
+        for name in printers:
+            self._combo_printers.addItem(name)
+        if not printers:
+            self._combo_printers.addItem("No se encontraron impresoras")
+
+        # Preseleccionar la predeterminada del sistema si está disponible, sin
+        # alterar el nombre real (necesario para imprimir correctamente).
+        if default and default in printers:
+            self._combo_printers.setCurrentText(default)
+        else:
             self._combo_printers.setCurrentIndex(-1)
-        except ImportError:
-            self._combo_printers.addItem("Módulo de impresión no disponible")
 
     def _load_client_templates(self, cliente_id: int) -> None:
         """Carga las plantillas del cliente seleccionado en el combo de plantillas.

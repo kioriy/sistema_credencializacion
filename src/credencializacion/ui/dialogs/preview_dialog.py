@@ -5,8 +5,8 @@ import logging
 from pathlib import Path
 
 import qtawesome as qta
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtCore import Qt, Signal, QUrl
+from PySide6.QtGui import QImage, QPixmap, QDesktopServices
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -362,6 +362,37 @@ class PreviewDialog(QDialog):
 
         # ── Botón cerrar ───────────────────────────────────────────────
         close_bar = QHBoxLayout()
+
+        # Abrir el PDF de la pestaña activa en el visor por defecto del SO.
+        self._btn_open_external = QPushButton(
+            qta.icon("fa5s.external-link-alt", color=TEXT_DARK),
+            "  Abrir en visor del sistema",
+        )
+        self._btn_open_external.setStyleSheet(
+            f"""
+            QPushButton {{
+                background: {CARD_BG};
+                color: {TEXT_DARK};
+                border: 1px solid {BORDER};
+                border-radius: 6px;
+                padding: 8px 18px;
+                font-size: 13px;
+                font-weight: 600;
+            }}
+            QPushButton:hover {{
+                background: {MAIN_BG};
+                border-color: {TEXT_LIGHT};
+            }}
+            QPushButton:disabled {{
+                color: {TEXT_LIGHT};
+                border-color: {BORDER};
+            }}
+            """
+        )
+        self._btn_open_external.setEnabled(self._tabs.count() > 0)
+        self._btn_open_external.clicked.connect(self._open_in_system_viewer)
+        close_bar.addWidget(self._btn_open_external)
+
         close_bar.addStretch()
         btn_close = QPushButton("Cerrar")
         btn_close.setStyleSheet(
@@ -410,6 +441,23 @@ class PreviewDialog(QDialog):
         if text.startswith("—"):
             return None
         return text
+
+    def _current_pdf_path(self) -> Path | None:
+        """PDF de la pestaña actualmente visible, si existe."""
+        widget = self._tabs.currentWidget() if self._tabs.count() else None
+        pdf = getattr(widget, "pdf_path", None)
+        if pdf and Path(pdf).exists():
+            return Path(pdf)
+        return None
+
+    def _open_in_system_viewer(self) -> None:
+        """Abre el PDF de la pestaña activa en el visor por defecto del SO."""
+        pdf = self._current_pdf_path()
+        if pdf is None:
+            return
+        opened = QDesktopServices.openUrl(QUrl.fromLocalFile(str(pdf)))
+        if not opened:
+            logger.warning("No se pudo abrir el PDF en el visor del sistema: %s", pdf)
 
     # ── Slots de impresión ─────────────────────────────────────────────
 

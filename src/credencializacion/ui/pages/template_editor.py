@@ -971,12 +971,36 @@ class TemplateEditor(QWidget):
             btn_prev.clicked.connect(lambda _, s=side: self.preview_template(cara=s))
             row_lay.addWidget(btn_prev)
 
+            # Botón de configuración de multiplantillaje (icono engranaje, Req 1.1/1.2).
+            # Solo icono, sin etiqueta. Se habilita únicamente cuando la plantilla
+            # está guardada y asociada a un Cliente (Req 1.5). El estado y tooltip
+            # se ajustan en _update_config_buttons_state tras cargar/guardar.
+            btn_config = QPushButton()
+            # color_disabled visible: qtawesome, por defecto, dibuja el icono
+            # deshabilitado en un gris tan tenue que parece no mostrarse. La
+            # plantilla aún no guardada deja el botón deshabilitado, así que sin
+            # esto el engranaje resultaba invisible.
+            btn_config.setIcon(
+                qta.icon("fa5s.cog", color="#64748B", color_disabled="#CBD5E1")
+            )
+            btn_config.setIconSize(QSize(16, 16))
+            btn_config.setFixedSize(28, 24)
+            btn_config.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            btn_config.setStyleSheet(_preview_btn_style)
+            btn_config.clicked.connect(lambda _, s=side: self._open_multi_template_dialog(s))
+            row_lay.addWidget(btn_config)
+
             if side == "frente":
                 self._lbl_frente_header = lbl
                 self._btn_preview_frente = btn_prev
+                self._btn_config_frente = btn_config
             else:
                 self._lbl_vuelta_header = lbl
                 self._btn_preview_vuelta = btn_prev
+                self._btn_config_vuelta = btn_config
+
+            # Estado inicial coherente (deshabilitado mientras no haya plantilla guardada).
+            self._update_config_buttons_state()
 
             return row
 
@@ -1135,8 +1159,62 @@ class TemplateEditor(QWidget):
         # Cargar atributos del cliente asociado a la plantilla
         self._load_client_attributes(plantilla.cliente_id)
 
+        # Reflejar el estado guardado en el botón de configuración (Req 1.5).
+        self._update_config_buttons_state()
 
-    def _load_client_attributes(self, cliente_id: int) -> None:
+    def _update_config_buttons_state(self) -> None:
+        """Habilita/deshabilita los botones de configuración de multiplantillaje
+        y ajusta su tooltip según si la plantilla está guardada (Req 1.4/1.5).
+
+        La plantilla se considera guardada cuando ``self._plantilla`` existe y
+        tiene un ``cliente_id`` identificable.
+        """
+        enabled = bool(
+            getattr(self, "_plantilla", None) is not None
+            and getattr(self._plantilla, "cliente_id", None)
+        )
+        if enabled:
+            tooltip = "Configurar multiplantillaje"
+        else:
+            tooltip = "Guarda la plantilla antes de configurar el multiplantillaje"
+
+        for attr in ("_btn_config_frente", "_btn_config_vuelta"):
+            btn = getattr(self, attr, None)
+            if btn is not None:
+                btn.setEnabled(enabled)
+                btn.setToolTip(tooltip)
+
+    def _open_multi_template_dialog(self, side: str) -> None:
+        """Abre el diálogo de configuración de multiplantillaje para el cliente
+        de la plantilla en edición (Req 1.3).
+
+        Si el diálogo no puede abrirse, muestra un mensaje de error y mantiene
+        el editor sin cambios (Req 1.6).
+
+        Args:
+            side: Lado desde el que se activó el botón ('frente' o 'vuelta').
+        """
+        from PySide6.QtWidgets import QMessageBox
+
+        # Guarda de seguridad: solo se opera con plantilla guardada (Req 1.5).
+        if getattr(self, "_plantilla", None) is None or not getattr(
+            self._plantilla, "cliente_id", None
+        ):
+            return
+
+        try:
+            from credencializacion.ui.dialogs.multi_template_dialog import (
+                MultiTemplateDialog,
+            )
+
+            dialog = MultiTemplateDialog(self._plantilla.cliente_id, self)
+            dialog.exec()
+        except Exception as e:  # noqa: BLE001 — mantener el editor sin cambios (Req 1.6)
+            QMessageBox.critical(
+                self,
+                "Multiplantillaje",
+                f"No se pudo abrir la configuración de multiplantillaje.\n\n{e}",
+            )
         """Carga los atributos conocidos del cliente en el toolbar.
 
         Si el cliente ya fue sincronizado, usa sus `known_attributes`.
@@ -1172,47 +1250,169 @@ class TemplateEditor(QWidget):
     def _select_base_image(self, side: str) -> None:
         """Abre un explorador de archivos para seleccionar la imagen base del lado.
 
+        Permite seleccionar **varias** imágenes a la vez (Cmd/Shift-clic en
+        macOS). Con una sola imagen se asigna como fondo del lado actual; con
+        varias, cada imagen se convierte en un nuevo diseño del cliente y se abre
+        el flujo de configuración de multiplantillaje para asignar atributos y
+        valores.
+
         Args:
             side: 'frente' o 'vuelta'.
         """
-        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        from PySide6.QtWidgets import QFileDialog
         from pathlib import Path
-        import shutil
 
-        path_str, _ = QFileDialog.getOpenFileName(
+        paths, _ = QFileDialog.getOpenFileNames(
             self,
-            f"Seleccionar imagen base — {side.upper()}",
+            f"Seleccionar imagen base — {side.upper()} "
+            "(elige varias para crear varios diseños)",
             str(Path.home()),
             "Imágenes (*.png *.jpg *.jpeg *.webp)",
         )
-        if not path_str:
+        if not paths:
             return
 
-        src = Path(path_str)
+        if len(paths) == 1:
+            self._apply_single_base_image(side, paths[0])
+            return
 
-        # Carpeta de destino: plantilla_base/ en el directorio del proyecto
+        # Selección múltiple: crear un diseño por imagen e iniciar el flujo de
+        # multiplantillaje.
+        self._create_designs_from_images(side, paths)
+
+    def _copy_to_plantilla_base(self, path_str: str) -> "Path | None":
+        """Copia una imagen a ``plantilla_base/`` y devuelve su ruta destino.
+
+        Devuelve ``None`` si la copia falla (informando el error en el estado).
+        """
+        from pathlib import Path
+        import shutil
+
+        src = Path(path_str)
         project_root = Path(__file__).parent.parent.parent.parent.parent
         dest_folder = project_root / "plantilla_base"
         dest_folder.mkdir(parents=True, exist_ok=True)
-
         dest = dest_folder / src.name
 
-        # Copiar si no está ya en la carpeta
         if src.resolve() != dest.resolve():
             try:
                 shutil.copy2(src, dest)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 self.set_status(f"❌ No se pudo copiar la imagen: {e}", "error")
-                return
+                return None
+        return dest
+
+    def _apply_single_base_image(self, side: str, path_str: str) -> None:
+        """Asigna una única imagen como fondo del lado indicado del diseño actual."""
+        from pathlib import Path
+
+        dest = self._copy_to_plantilla_base(path_str)
+        if dest is None:
+            return
 
         # Guardar la ruta en los recursos de la plantilla (en memoria y DB)
         self._save_base_image_path(side, str(dest))
-
         # Aplicar al canvas inmediatamente
         self._apply_base_image_to_scene(side, dest)
-
         # Actualizar etiqueta del header
-        self._update_header_label(side, src.name)
+        self._update_header_label(side, Path(path_str).name)
+
+    def _create_designs_from_images(self, side: str, paths: list[str]) -> None:
+        """Crea un diseño (Plantilla) por cada imagen y abre el multiplantillaje.
+
+        Cada imagen seleccionada se copia a ``plantilla_base/`` y origina un
+        nuevo diseño del mismo cliente, clonando tipo/orientación/dimensiones del
+        diseño actual y usando la imagen como fondo del lado indicado. Al
+        terminar se abre el ``MultiTemplateDialog`` para asignar atributos y
+        valores a los diseños del cliente.
+
+        Requiere que el diseño actual esté guardado para conocer el cliente; si
+        no lo está, ofrece guardarlo primero.
+        """
+        from PySide6.QtWidgets import QMessageBox
+        from pathlib import Path
+
+        # Se necesita el cliente del diseño actual (Req 1.5). Si no está guardado,
+        # se ofrece guardar para poder asociar los nuevos diseños.
+        if getattr(self, "_plantilla", None) is None or not getattr(
+            self._plantilla, "cliente_id", None
+        ):
+            reply = QMessageBox.question(
+                self,
+                "Guardar diseño",
+                "Para crear varios diseños hay que guardar primero el diseño "
+                "actual y asociarlo a un cliente. ¿Guardar ahora?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self.save_template()
+            if getattr(self, "_plantilla", None) is None or not getattr(
+                self._plantilla, "cliente_id", None
+            ):
+                return
+
+        cliente_id = self._plantilla.cliente_id
+        tipo = self._plantilla.tipo
+        orientacion = self._plantilla.orientacion
+        ancho = self._plantilla.ancho
+        alto = self._plantilla.alto
+
+        from credencializacion.db.engine import get_session
+        from credencializacion.db.models import Plantilla
+
+        creados = 0
+        errores = 0
+        with get_session() as session:
+            # Nombres ya usados por el cliente para evitar duplicados visibles.
+            usados = {
+                n for (n,) in session.query(Plantilla.nombre)
+                .filter(Plantilla.cliente_id == cliente_id)
+                .all()
+            }
+            for path_str in paths:
+                dest = self._copy_to_plantilla_base(path_str)
+                if dest is None:
+                    errores += 1
+                    continue
+
+                base_nombre = Path(path_str).stem or "Diseño"
+                nombre = base_nombre
+                sufijo = 2
+                while nombre in usados:
+                    nombre = f"{base_nombre} ({sufijo})"
+                    sufijo += 1
+                usados.add(nombre)
+
+                session.add(
+                    Plantilla(
+                        cliente_id=cliente_id,
+                        nombre=nombre,
+                        tipo=tipo,
+                        orientacion=orientacion,
+                        ancho=ancho,
+                        alto=alto,
+                        elementos_frente=[],
+                        elementos_vuelta=[],
+                        recursos={f"fondo_{side}": str(dest)},
+                    )
+                )
+                creados += 1
+            session.commit()
+
+        if creados == 0:
+            self.set_status(
+                "❌ No se pudo crear ningún diseño a partir de las imágenes.",
+                "error",
+            )
+            return
+
+        msg = f"✅ {creados} diseño(s) creado(s) a partir de las imágenes."
+        if errores:
+            msg += f" {errores} no se pudieron copiar."
+        self.set_status(msg, "success")
+
+        # Abrir el flujo de asignación de multiplantillaje para el cliente.
+        self._open_multi_template_dialog(side)
 
     def _save_base_image_path(self, side: str, path: str) -> None:
         """Persiste la ruta de la imagen base en Plantilla.recursos."""
@@ -1358,6 +1558,8 @@ class TemplateEditor(QWidget):
                     flag_modified(plantilla_db, "recursos")
                     session.commit()
                     self.set_status("✅ Plantilla actualizada.", "success")
+                    # Reflejar el estado guardado en el botón de configuración (Req 1.5).
+                    self._update_config_buttons_state()
 
     def open_template_dialog(self) -> None:
         """Abre el diálogo para cargar una plantilla guardada."""
@@ -1372,6 +1574,52 @@ class TemplateEditor(QWidget):
                 if plantilla:
                     session.expunge(plantilla)
                     self.load_template(plantilla)
+
+    def _reset_header_label(self, side: str) -> None:
+        """Restablece la etiqueta de cabecera de un lado a su estado inicial."""
+        lbl = self._lbl_frente_header if side == "frente" else self._lbl_vuelta_header
+        title = "FRENTE" if side == "frente" else "VUELTA"
+        lbl.setText(
+            f"🖼 {title}  "
+            f"<span style='font-size:10px; color:#94A3B8;'>(clic para imagen base)</span>"
+        )
+
+    def new_template(self) -> None:
+        """Crea una plantilla nueva en blanco e inicializa los lienzos.
+
+        Descarta el diseño abierto previamente (sin guardarlo ni tocar la base
+        de datos): limpia ambas escenas, el estado local y la plantilla en
+        memoria, restablece la orientación por defecto y deja el editor listo
+        para diseñar desde cero. Resuelve el caso de quedar con los lienzos de
+        una plantilla abierta previamente al empezar una nueva.
+        """
+        # Estado en memoria (no guardado todavía).
+        self._plantilla = None
+        self._local_frente = []
+        self._local_vuelta = []
+        self._local_recursos = {}
+        self._current_side = "frente"
+        self._undo_stack.clear()
+        self._redo_stack.clear()
+
+        # Limpiar ambas escenas (elementos e imágenes base).
+        self._scene_frente.clear()
+        self._scene_vuelta.clear()
+
+        # Orientación por defecto (horizontal) — también reajusta el tamaño de
+        # los lienzos a 8.5×5.4 cm.
+        self.set_orientation(True)
+
+        # Restablecer cabeceras y paneles.
+        self._reset_header_label("frente")
+        self._reset_header_label("vuelta")
+        self._layers_panel.set_layers([])
+        self._properties_panel.update_properties(None)
+
+        # Sin plantilla guardada: botones de multiplantillaje deshabilitados.
+        self._update_config_buttons_state()
+
+        self.set_status("📄 Nueva plantilla. Diseña y pulsa Guardar.", "info")
 
 
 
