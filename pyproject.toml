@@ -1,6 +1,6 @@
 [project]
 name = "sistema-credencializacion"
-version = "0.1.5"
+version = "1.0.0"
 description = "Sistema de diseño e impresión de credenciales para múltiples organizaciones"
 readme = "README.md"
 requires-python = ">=3.12"
