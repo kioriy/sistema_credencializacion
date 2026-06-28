@@ -34,7 +34,7 @@ def _build_session(retries: int = _DEFAULT_RETRIES) -> requests.Session:
         total=retries,
         backoff_factor=_BACKOFF_FACTOR,
         status_forcelist=list(_RETRY_STATUS_CODES),
-        allowed_methods=["GET"],
+        allowed_methods=["GET", "POST"],
         raise_on_status=False,
     )
     adapter = HTTPAdapter(max_retries=retry_strategy)
@@ -45,6 +45,7 @@ def _build_session(retries: int = _DEFAULT_RETRIES) -> requests.Session:
 
 # ── Columnas de alumnos que produce este adaptador ───────────────────
 _STUDENT_COLUMNS: list[str] = [
+    "student_id",
     "nombre",
     "apellido",
     "nombre_completo",
@@ -73,6 +74,8 @@ class MiEscuelaAdapter(DataAdapter):
 
     ENDPOINT_SCHOOLS = "/api/credentials/schools"
     ENDPOINT_EXPORT = "/api/credentials/export"
+    ENDPOINT_MARK_PRINTING = "/api/credentials/bulk-mark-printing"
+    ENDPOINT_MARK_READY = "/api/credentials/bulk-mark-ready"
 
     def __init__(
         self,
@@ -203,6 +206,64 @@ class MiEscuelaAdapter(DataAdapter):
     def get_source_name(self) -> str:
         return f"MiEscuela API ({self._base_url})"
 
+    # ── API: Marcar estatus de credenciales en lote ──────────────────
+
+    def mark_printing(self, student_ids: list[int]) -> dict:
+        """Marca las credenciales indicadas como 'En impresión'.
+
+        Args:
+            student_ids: IDs de alumno (campo ``id`` del API).
+
+        Returns:
+            La respuesta JSON del endpoint (``success``, ``message``, ``updated``).
+        """
+        return self._bulk_mark(self.ENDPOINT_MARK_PRINTING, student_ids)
+
+    def mark_ready(self, student_ids: list[int]) -> dict:
+        """Marca las credenciales indicadas como 'Listas/Impresas'.
+
+        Args:
+            student_ids: IDs de alumno (campo ``id`` del API).
+
+        Returns:
+            La respuesta JSON del endpoint.
+        """
+        return self._bulk_mark(self.ENDPOINT_MARK_READY, student_ids)
+
+    def _bulk_mark(self, endpoint: str, student_ids: list[int]) -> dict:
+        """POST genérico para los endpoints de marcado en lote.
+
+        Filtra IDs vacíos/None y envía ``{"student_ids": [...]}``.
+
+        Raises:
+            ValueError: Si no hay IDs válidos para enviar.
+            ConnectionError: Si la API no responde o devuelve error.
+        """
+        ids = [int(s) for s in student_ids if s not in (None, "")]
+        if not ids:
+            raise ValueError("No hay student_ids válidos para marcar.")
+
+        url = f"{self._base_url}{endpoint}"
+        headers = {**self._headers, "Content-Type": "application/json"}
+        logger.info("POST %s (%d ids)", url, len(ids))
+
+        try:
+            response = self._session.post(
+                url, headers=headers, json={"student_ids": ids},
+                timeout=_REQUEST_TIMEOUT,
+            )
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            logger.error("Error al marcar credenciales (%s): %s", endpoint, exc)
+            raise ConnectionError(
+                f"No se pudo actualizar el estatus de las credenciales: {exc}"
+            ) from exc
+
+        try:
+            return response.json()
+        except ValueError:
+            return {"success": True, "message": "", "updated": len(ids)}
+
     # ── Lógica interna ───────────────────────────────────────────────
 
     @staticmethod
@@ -234,6 +295,8 @@ class MiEscuelaAdapter(DataAdapter):
         nombre = raw.get("first_name", "") or ""
         apellido = raw.get("last_name", "") or ""
         record: dict[str, Any] = {
+            # ID del alumno en la API (necesario para marcar estatus en lote).
+            "student_id": raw.get("id"),
             "nombre": nombre,
             "apellido": apellido,
             "nombre_completo": f"{nombre} {apellido}".strip(),

@@ -48,6 +48,93 @@ BORDER = "#E2E8F0"
 MAIN_BG = "#F5F7FA"
 SUCCESS = "#22C55E"
 
+# Credenciales de la API MiEscuela (fallback si el Cliente no las tiene).
+_API_BASE_URL = "https://app.miescuela.net"
+_API_KEY = "7c9e6679-7425-40de-944b-e07fc1f90ae7"
+
+
+class QueueRenderWorker(QThread):
+    """Renderiza en segundo plano los PDFs (frentes y vueltas) de una cola.
+
+    Trabaja con IDs de registro + id de plantilla y produce dos PDFs (2 diseños
+    por hoja) en ``out_dir``. Abre su propia sesión de BD (solo lectura) en el
+    hilo del worker. Emite ``progress`` con mensajes de estado para el footer,
+    ``finished_ok`` con las rutas resultantes y ``failed`` ante un error.
+    """
+
+    progress = Signal(str)
+    finished_ok = Signal(str, str)  # frentes_pdf, vueltas_pdf
+    failed = Signal(str)
+
+    def __init__(self, record_ids: list[int], plantilla_id: int, out_dir: str) -> None:
+        super().__init__()
+        self._record_ids = list(record_ids)
+        self._plantilla_id = plantilla_id
+        self._out_dir = out_dir
+
+    def run(self) -> None:  # noqa: D401
+        try:
+            from pathlib import Path
+            from credencializacion.db.engine import DatabaseSession
+            from credencializacion.db.models import Plantilla, Registro
+            from credencializacion.db.repositories import LadoConfigRepository
+            from credencializacion.services.image_selection import select_imagen
+            from credencializacion.renderer.pdf_engine import PDFEngine
+
+            out_dir = Path(self._out_dir)
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+            with DatabaseSession() as session:
+                plantilla = session.query(Plantilla).get(self._plantilla_id)
+                if plantilla is None:
+                    self.failed.emit("Plantilla no encontrada")
+                    return
+
+                regs_by_id = {
+                    r.id: r
+                    for r in session.query(Registro)
+                    .filter(Registro.id.in_(self._record_ids))
+                    .all()
+                }
+                render_items = [
+                    (regs_by_id[i], plantilla)
+                    for i in self._record_ids
+                    if i in regs_by_id
+                ]
+                if not render_items:
+                    self.failed.emit("No hay registros para renderizar")
+                    return
+
+                def _overrides(cara: str) -> list[str | None]:
+                    cfg = LadoConfigRepository.get_config_lado(
+                        session, self._plantilla_id, cara
+                    )
+                    if cfg is None:
+                        return [None] * len(render_items)
+                    return [
+                        select_imagen(reg.datos or {}, cfg)
+                        for reg, _ in render_items
+                    ]
+
+                engine = PDFEngine(plantilla)
+
+                self.progress.emit("🖼 Generando PDF de frentes...")
+                frentes_pdf = engine.render_queue(
+                    render_items, "frente", out_dir / "frentes.pdf",
+                    fondo_overrides=_overrides("frente"),
+                )
+
+                self.progress.emit("🖼 Generando PDF de vueltas...")
+                vueltas_pdf = engine.render_queue(
+                    render_items, "vuelta", out_dir / "vueltas.pdf",
+                    fondo_overrides=_overrides("vuelta"),
+                )
+
+            self.finished_ok.emit(str(frentes_pdf), str(vueltas_pdf))
+        except Exception as e:  # noqa: BLE001
+            logger.error("Error al renderizar cola en segundo plano: %s", e)
+            self.failed.emit(str(e))
+
 
 class ControlPanel(QWidget):
     """Panel de control principal con tabla de registros.
@@ -86,7 +173,9 @@ class ControlPanel(QWidget):
         self._pending_photos: dict[int, str] = {}  # reply_id -> url
         self._setup_ui()
         self._connect_signals()
-        self._load_system_printers()
+        self._render_worker = None
+        self._render_on_done = None
+        self._mark_workers = []
 
     # ── Construcción de UI ─────────────────────────────────────────
 
@@ -306,19 +395,11 @@ class ControlPanel(QWidget):
         self._lbl_filter_count.setVisible(False)
         row1.addWidget(self._lbl_filter_count)
 
-        # --- Fila 2: Plantilla + Impresora ---
+        # --- Fila 2: Plantilla ---
         self._combo_templates = QComboBox()
         self._combo_templates.addItem("Plantillas")
         self._combo_templates.setStyleSheet(combo_style)
         row2.addWidget(self._combo_templates, stretch=1)
-
-        self._combo_printers = QComboBox()
-        self._combo_printers.setEditable(True)
-        self._combo_printers.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-        self._combo_printers.lineEdit().setPlaceholderText("Seleccionar impresora...")
-        self._combo_printers.setCurrentIndex(-1)
-        self._combo_printers.setStyleSheet(combo_style)
-        row2.addWidget(self._combo_printers, stretch=1)
 
         filter_bar.addLayout(row1)
         filter_bar.addLayout(row2)
@@ -536,15 +617,11 @@ class ControlPanel(QWidget):
             self._combo_templates.addItem(name, userData=tmpl_id)
 
     def set_printers(self, printers: list[str]) -> None:
-        """Actualiza el combo de impresoras.
+        """Compatibilidad: el selector de impresoras fue retirado.
 
-        Args:
-            printers: Lista de nombres de impresoras.
+        Se conserva el método como no-op para no romper llamadas externas.
         """
-        self._combo_printers.clear()
-        self._combo_printers.addItem("Impresoras")
-        for name in printers:
-            self._combo_printers.addItem(name)
+        return
 
 
 
@@ -605,11 +682,11 @@ class ControlPanel(QWidget):
     # ── Handlers de acciones ───────────────────────────────────────
 
     def _on_preview(self) -> None:
-        """Genera la vista previa de la cola de impresión en memoria.
+        """Genera la vista previa de la cola de impresión sin bloquear la app.
 
-        Renderiza dos documentos (frentes y vueltas) con 2 diseños por hoja,
-        usando el diseño seleccionado y los overrides de multiplantillaje por
-        lado, y los muestra en el diálogo de vista previa.
+        El render (frentes y vueltas, 2 diseños por hoja) se ejecuta en un hilo
+        en segundo plano; el progreso se refleja en el footer y, al terminar, se
+        abre el diálogo de vista previa.
         """
         queue_records = self._queue_panel.get_queue()
         if not queue_records:
@@ -621,98 +698,66 @@ class ControlPanel(QWidget):
             self.set_status("⚠️ Selecciona una plantilla primero", "warning")
             return
 
-        from credencializacion.db.engine import DatabaseSession
-        from credencializacion.db.models import Plantilla, Registro
-        from credencializacion.renderer.pdf_engine import PDFEngine
-        from credencializacion.ui.dialogs.preview_dialog import PreviewDialog
-        from pathlib import Path
+        if getattr(self, "_render_worker", None) is not None:
+            self.set_status("⏳ Ya hay una generación en curso...", "warning", toast=False)
+            return
+
         import tempfile
 
+        ids = [r.id for r in queue_records]
+        out_dir = tempfile.mkdtemp(prefix="credencial_preview_")
+
         self.set_status("🖼 Generando vista previa...", "info", toast=False)
+        self._start_render(ids, plantilla_id, out_dir, self._on_preview_ready)
 
-        try:
-            ids = [r.id for r in queue_records]
-            with DatabaseSession() as session:
-                plantilla = session.query(Plantilla).get(plantilla_id)
-                if plantilla is None:
-                    self.set_status("⚠️ Plantilla no encontrada", "warning")
-                    return
+    def _on_preview_ready(self, frentes_pdf: str, vueltas_pdf: str) -> None:
+        """Abre el diálogo de vista previa con los PDFs ya generados."""
+        from pathlib import Path
+        from credencializacion.ui.dialogs.preview_dialog import PreviewDialog
 
-                # Re-cargar registros dentro de la sesión, preservando el orden
-                # de la cola.
-                regs_by_id = {
-                    r.id: r
-                    for r in session.query(Registro).filter(Registro.id.in_(ids)).all()
-                }
-                render_items = [
-                    (regs_by_id[i], plantilla) for i in ids if i in regs_by_id
-                ]
-                if not render_items:
-                    self.set_status("⚠️ No hay registros para previsualizar", "warning")
-                    return
+        self.set_status("✅ Vista previa generada", "success", toast=False)
+        dlg = PreviewDialog(
+            frentes_pdf=Path(frentes_pdf),
+            vueltas_pdf=Path(vueltas_pdf),
+            parent=self,
+        )
+        dlg.exec()
 
-                overrides_frente = self._compute_fondo_overrides(
-                    session, render_items, "frente"
-                )
-                overrides_vuelta = self._compute_fondo_overrides(
-                    session, render_items, "vuelta"
-                )
+    # ── Render en segundo plano (compartido) ───────────────────────
 
-                engine = PDFEngine(plantilla)
-                tmp_dir = Path(tempfile.mkdtemp(prefix="credencial_preview_"))
-                frentes_pdf = engine.render_queue(
-                    render_items, "frente", tmp_dir / "frentes.pdf",
-                    fondo_overrides=overrides_frente,
-                )
-                vueltas_pdf = engine.render_queue(
-                    render_items, "vuelta", tmp_dir / "vueltas.pdf",
-                    fondo_overrides=overrides_vuelta,
-                )
+    def _start_render(self, ids, plantilla_id, out_dir, on_done) -> None:
+        """Lanza un ``QueueRenderWorker`` y enruta sus señales.
 
-            dlg = PreviewDialog(
-                frentes_pdf=frentes_pdf,
-                vueltas_pdf=vueltas_pdf,
-                parent=self,
-            )
-            self.set_status("✅ Vista previa generada", "success", toast=False)
-            dlg.exec()
-
-        except Exception as e:
-            self.set_status(f"❌ Error en vista previa: {e}", "error")
-
-    def _compute_fondo_overrides(
-        self, session, render_items, cara: str
-    ) -> list[str | None]:
-        """Calcula la imagen de fondo por ítem para un lado (multiplantillaje).
-
-        Para cada (registro, plantilla), si el diseño tiene `ConfiguracionLado`
-        para ese lado, evalúa las variantes contra los datos del registro y
-        devuelve la ruta elegida; si no hay configuración, devuelve ``None`` (se
-        usa la imagen base del diseño). La config de cada diseño se cachea por id.
+        ``on_done`` se invoca en el hilo principal con (frentes_pdf, vueltas_pdf)
+        cuando el render termina correctamente.
         """
-        from credencializacion.db.repositories import LadoConfigRepository
-        from credencializacion.services.image_selection import select_imagen
+        self._render_on_done = on_done
+        self._render_worker = QueueRenderWorker(ids, plantilla_id, out_dir)
+        self._render_worker.progress.connect(
+            lambda m: self.set_status(m, "info", toast=False)
+        )
+        self._render_worker.finished_ok.connect(self._on_render_ok)
+        self._render_worker.failed.connect(self._on_render_failed)
+        self._render_worker.finished.connect(self._cleanup_render_worker)
+        self._render_worker.start()
 
-        cache: dict[int, object] = {}
-        overrides: list[str | None] = []
-        for registro, plantilla in render_items:
-            pid = plantilla.id
-            if pid not in cache:
-                cache[pid] = LadoConfigRepository.get_config_lado(session, pid, cara)
-            config = cache[pid]
-            if config is None:
-                overrides.append(None)
-            else:
-                overrides.append(select_imagen(registro.datos or {}, config))
-        return overrides
+    @Slot(str, str)
+    def _on_render_ok(self, frentes_pdf: str, vueltas_pdf: str) -> None:
+        cb = getattr(self, "_render_on_done", None)
+        if cb is not None:
+            cb(frentes_pdf, vueltas_pdf)
+
+    @Slot(str)
+    def _on_render_failed(self, message: str) -> None:
+        self.set_status(f"❌ Error al generar PDFs: {message}", "error")
+
+    def _cleanup_render_worker(self) -> None:
+        self._render_worker = None
+        self._render_on_done = None
 
     def _on_print_front(self) -> None:
-        """Emite señal de impresión frontal guardando la cola."""
-        self._save_queue_and_emit("front")
-
-    def _on_print_back(self) -> None:
-        """Emite señal de impresión trasera guardando la cola."""
-        self._save_queue_and_emit("back")
+        """Envía la cola en memoria al Centro de Impresión (genera y guarda PDFs)."""
+        self._send_queue_to_print_center()
 
     def _add_single_to_queue(self, reg_id: int) -> None:
         """Agrega un único registro a la cola visual."""
@@ -752,8 +797,14 @@ class ControlPanel(QWidget):
         if added > 0:
             self.set_status(f"✅ {added} registros agregados a la cola", "success")
 
-    def _save_queue_and_emit(self, mode: str) -> None:
-        """Guarda la cola visual en la BD y notifica al Centro de Impresión."""
+    def _send_queue_to_print_center(self) -> None:
+        """Crea la cola en BD y genera/guarda sus PDFs sin bloquear la app.
+
+        Crea la ``ColaImpresion`` y sus ítems, luego renderiza en segundo plano
+        los PDFs de frentes y vueltas (2 diseños por hoja) en una carpeta estable
+        (build-safe) y guarda sus rutas en la cola. Al terminar, limpia la cola
+        visual y refresca el Centro de Impresión.
+        """
         queue_records = self._queue_panel.get_queue()
         if not queue_records:
             self.set_status("⚠️ La cola de impresión está vacía", "warning")
@@ -764,51 +815,138 @@ class ControlPanel(QWidget):
             self.set_status("⚠️ Selecciona una plantilla", "warning")
             return
 
-        # Crear en BD
+        if getattr(self, "_render_worker", None) is not None:
+            self.set_status("⏳ Ya hay una generación en curso...", "warning", toast=False)
+            return
+
         from credencializacion.db.engine import DatabaseSession
         from credencializacion.db.models import ColaImpresion, ItemCola
 
+        ids = [r.id for r in queue_records]
         try:
             with DatabaseSession() as session:
                 plantilla_nombre = self._combo_templates.currentText()
-                tipo = "Frentes" if mode == "front" else "Vueltas"
                 cola = ColaImpresion(
-                    nombre=f"{plantilla_nombre} — {len(queue_records)} {tipo}",
+                    nombre=f"{plantilla_nombre} — {len(queue_records)} registros",
                     total_registros=len(queue_records),
                 )
                 session.add(cola)
                 session.flush()
 
                 # Todos los ítems usan el diseño seleccionado. El multiplantillaje
-                # ya NO cambia de diseño por registro: solo intercambia la imagen
-                # de fondo por lado, lo cual se resuelve en el momento del render
-                # (print_center) consultando la ConfiguracionLado del diseño.
-                items_creados = 0
+                # solo intercambia la imagen de fondo por lado, resuelto al
+                # renderizar consultando la ConfiguracionLado del diseño.
                 for orden, reg in enumerate(queue_records, start=1):
-                    item = ItemCola(
-                        cola_id=cola.id,
-                        registro_id=reg.id,
-                        plantilla_id=plantilla_id,
-                        orden=orden,
+                    session.add(
+                        ItemCola(
+                            cola_id=cola.id,
+                            registro_id=reg.id,
+                            plantilla_id=plantilla_id,
+                            orden=orden,
+                        )
                     )
-                    session.add(item)
-                    items_creados += 1
-
-                cola.total_registros = items_creados
-
+                cola.total_registros = len(queue_records)
                 session.commit()
-                self.set_status(f"✅ Cola de {tipo} guardada exitosamente", "success")
-                
-                self._queue_panel.clear_queue()
-                self.add_to_queue_requested.emit()
-
-                if mode == "front":
-                    self.print_front_requested.emit([r.id for r in queue_records])
-                else:
-                    self.print_back_requested.emit([r.id for r in queue_records])
-
+                cola_id = cola.id
         except Exception as e:
             self.set_status(f"❌ Error al guardar cola: {e}", "error")
+            return
+
+        from credencializacion.utils.paths import get_cola_pdf_dir
+
+        out_dir = str(get_cola_pdf_dir(cola_id))
+        self.set_status("📤 Enviando al Centro de Impresión...", "info", toast=False)
+
+        # Marcar credenciales como 'En impresión' en la API (en segundo plano).
+        first_cliente_id = getattr(queue_records[0], "cliente_id", None)
+        student_ids = self._collect_student_ids(queue_records)
+        if student_ids and first_cliente_id:
+            self._start_bulk_mark(first_cliente_id, "printing", student_ids)
+
+        self._start_render(
+            ids,
+            plantilla_id,
+            out_dir,
+            lambda f, v: self._on_queue_pdfs_ready(cola_id, f, v),
+        )
+
+    @staticmethod
+    def _collect_student_ids(registros) -> list[int]:
+        """Extrae los ``student_id`` (id del API) de una lista de registros."""
+        ids: list[int] = []
+        for reg in registros:
+            sid = reg.get_dato("student_id", None) if hasattr(reg, "get_dato") else None
+            if sid in (None, ""):
+                continue
+            try:
+                ids.append(int(sid))
+            except (TypeError, ValueError):
+                continue
+        return ids
+
+    def _client_api_credentials(self, cliente_id: int) -> tuple[str, str]:
+        """Devuelve (base_url, api_key) del Cliente, con fallback a constantes."""
+        from credencializacion.db.engine import get_session
+        from credencializacion.db.models import Cliente
+
+        base_url, api_key = _API_BASE_URL, _API_KEY
+        try:
+            with get_session() as session:
+                cliente = session.query(Cliente).get(cliente_id)
+                if cliente is not None:
+                    base_url = cliente.api_base_url or base_url
+                    api_key = cliente.api_key or api_key
+        except Exception:  # noqa: BLE001
+            pass
+        return base_url, api_key
+
+    def _start_bulk_mark(
+        self, cliente_id: int, action: str, student_ids: list[int]
+    ) -> None:
+        """Lanza un ``BulkMarkWorker`` para marcar estatus sin bloquear la UI."""
+        from credencializacion.ui.status_worker import BulkMarkWorker
+
+        base_url, api_key = self._client_api_credentials(cliente_id)
+        worker = BulkMarkWorker(base_url, api_key, action, student_ids)
+        self._mark_workers.append(worker)
+
+        def _on_done(success: bool, message: str, updated: int) -> None:
+            if success:
+                self.set_status(
+                    f"🔔 Estatus actualizado: {updated} credenciales", "info", toast=False
+                )
+            else:
+                self.set_status(
+                    f"⚠️ No se pudo actualizar el estatus en la API: {message}",
+                    "warning",
+                )
+            if worker in self._mark_workers:
+                self._mark_workers.remove(worker)
+
+        worker.done.connect(_on_done)
+        worker.start()
+
+    def _on_queue_pdfs_ready(
+        self, cola_id: int, frentes_pdf: str, vueltas_pdf: str
+    ) -> None:
+        """Guarda las rutas de PDF en la cola y refresca el Centro de Impresión."""
+        from credencializacion.db.engine import DatabaseSession
+        from credencializacion.db.models import ColaImpresion
+
+        try:
+            with DatabaseSession() as session:
+                cola = session.query(ColaImpresion).get(cola_id)
+                if cola is not None:
+                    cola.pdf_frente_path = frentes_pdf
+                    cola.pdf_vuelta_path = vueltas_pdf
+                    session.commit()
+        except Exception as e:
+            self.set_status(f"❌ Error al guardar PDFs de la cola: {e}", "error")
+            return
+
+        self.set_status("✅ Cola enviada al Centro de Impresión", "success")
+        self._queue_panel.clear_queue()
+        self.add_to_queue_requested.emit()
 
     def _on_search_changed(self, text: str) -> None:
         """Filtra registros por texto de búsqueda en cualquier campo."""
@@ -902,29 +1040,6 @@ class ControlPanel(QWidget):
         self._pill_ready.setText(f"✅ Listos: {ready}")
         self._pill_no_photo.setText(f"📷 Sin foto: {no_photo}")
         self._pill_pending.setText(f"📝 Pendientes: {pending}")
-
-    def _load_system_printers(self) -> None:
-        """Carga las impresoras del sistema al combobox (fuente unificada)."""
-        from credencializacion.core.printer import (
-            get_default_printer,
-            get_system_printers,
-        )
-
-        printers = get_system_printers()
-        default = get_default_printer()
-
-        self._combo_printers.clear()
-        for name in printers:
-            self._combo_printers.addItem(name)
-        if not printers:
-            self._combo_printers.addItem("No se encontraron impresoras")
-
-        # Preseleccionar la predeterminada del sistema si está disponible, sin
-        # alterar el nombre real (necesario para imprimir correctamente).
-        if default and default in printers:
-            self._combo_printers.setCurrentText(default)
-        else:
-            self._combo_printers.setCurrentIndex(-1)
 
     def _load_client_templates(self, cliente_id: int) -> None:
         """Carga las plantillas del cliente seleccionado en el combo de plantillas.

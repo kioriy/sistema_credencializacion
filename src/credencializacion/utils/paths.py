@@ -238,3 +238,19 @@ def get_img_dir(cliente_nombre: str | None = None) -> Path:
         base = base / _slugify(cliente_nombre)
     base.mkdir(parents=True, exist_ok=True)
     return base
+
+
+def get_cola_pdf_dir(cola_id: int | None = None) -> Path:
+    """Directorio estable (build-safe) para los PDFs de las colas de impresión.
+
+    Igual que ``plantilla_base``/``img``: en la app empaquetada vive en la
+    carpeta de datos estable del usuario (fuera del directorio de la app, para
+    que las actualizaciones no la borren); en desarrollo, bajo la raíz del
+    proyecto (``data/colas_pdf``). Si se indica ``cola_id`` se devuelve la
+    subcarpeta de esa cola. Crea el directorio si no existe.
+    """
+    base = get_data_dir() / "colas_pdf"
+    if cola_id is not None:
+        base = base / str(cola_id)
+    base.mkdir(parents=True, exist_ok=True)
+    return base

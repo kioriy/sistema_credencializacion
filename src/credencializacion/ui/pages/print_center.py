@@ -114,6 +114,7 @@ class PrintCenter(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._selected_cola_id: int | None = None
+        self._mark_workers: list = []
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -419,70 +420,37 @@ class PrintCenter(QWidget):
         action_bar = QHBoxLayout()
         action_bar.setSpacing(8)
 
-        # Combo de impresora
-        self._combo_printer = QComboBox()
-        self._combo_printer.addItem("Seleccionar impresora...")
-        self._combo_printer.setMinimumWidth(200)
-        self._combo_printer.setStyleSheet(f"""
-            QComboBox {{
-                background-color: {MAIN_BG};
-                border: 1px solid {BORDER};
-                border-radius: 6px;
-                padding: 8px 12px;
-                font-size: 12px;
-                color: {TEXT_DARK};
-            }}
-            QComboBox:hover {{
-                border-color: {PRIMARY};
-            }}
-            QComboBox::drop-down {{
-                border: none;
-                width: 28px;
-                padding-right: 8px;
-            }}
-            QComboBox::down-arrow {{
-                image: none;
-                border-left: 5px solid transparent;
-                border-right: 5px solid transparent;
-                border-top: 5px solid {TEXT_LIGHT};
-                width: 0;
-                height: 0;
-                margin-right: 8px;
-            }}
-        """)
-        action_bar.addWidget(self._combo_printer)
-
         action_bar.addStretch()
 
-        # Vista Previa
-        self._btn_preview = QPushButton()
-        self._btn_preview.setIcon(qta.icon("fa5s.eye", color=TEXT_DARK))
-        self._btn_preview.setIconSize(QSize(16, 16))
-        self._btn_preview.setText("  Vista Previa")
-        self._btn_preview.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self._btn_preview.setStyleSheet(self._action_btn_style(False))
-        self._btn_preview.clicked.connect(self._preview_queue)
-        action_bar.addWidget(self._btn_preview)
-
-        # Imprimir Frentes
+        # Abrir Frente (abre el PDF de frentes guardado en el visor del sistema)
         self._btn_print_front = QPushButton()
-        self._btn_print_front.setIcon(qta.icon("fa5s.print", color="#FFFFFF"))
+        self._btn_print_front.setIcon(qta.icon("fa5s.external-link-alt", color="#FFFFFF"))
         self._btn_print_front.setIconSize(QSize(16, 16))
-        self._btn_print_front.setText("  Imprimir Frentes")
+        self._btn_print_front.setText("  Abrir Frente")
         self._btn_print_front.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self._btn_print_front.setStyleSheet(self._action_btn_style(True))
-        self._btn_print_front.clicked.connect(lambda: self._print_queue("frente"))
+        self._btn_print_front.clicked.connect(lambda: self._open_side_pdf("frente"))
         action_bar.addWidget(self._btn_print_front)
 
-        # Imprimir Vueltas
+        # Abrir Vuelta (abre el PDF de vueltas guardado en el visor del sistema)
         self._btn_print_back = QPushButton()
-        self._btn_print_back.setIcon(qta.icon("fa5s.print", color="#FFFFFF"))
+        self._btn_print_back.setIcon(qta.icon("fa5s.external-link-alt", color="#FFFFFF"))
         self._btn_print_back.setIconSize(QSize(16, 16))
-        self._btn_print_back.setText("  Imprimir Vueltas")
+        self._btn_print_back.setText("  Abrir Vuelta")
         self._btn_print_back.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self._btn_print_back.setStyleSheet(self._action_btn_style(True))
-        self._btn_print_back.clicked.connect(lambda: self._print_queue("vuelta"))
+        self._btn_print_back.clicked.connect(lambda: self._open_side_pdf("vuelta"))
         action_bar.addWidget(self._btn_print_back)
+
+        # Marcar impresas (notifica a la API: bulk-mark-ready)
+        self._btn_mark_ready = QPushButton()
+        self._btn_mark_ready.setIcon(qta.icon("fa5s.check-circle", color=TEXT_DARK))
+        self._btn_mark_ready.setIconSize(QSize(16, 16))
+        self._btn_mark_ready.setText("  Marcar impresas")
+        self._btn_mark_ready.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._btn_mark_ready.setStyleSheet(self._action_btn_style(False))
+        self._btn_mark_ready.clicked.connect(self._mark_queue_ready)
+        action_bar.addWidget(self._btn_mark_ready)
 
         layout.addLayout(action_bar)
 
@@ -642,16 +610,60 @@ class PrintCenter(QWidget):
         except Exception as e:
             self.set_status(f"❌ Error al eliminar: {e}", "error")
 
-    def _preview_queue(self) -> None:
-        """Muestra vista previa de la cola seleccionada."""
+    def _open_side_pdf(self, cara: str) -> None:
+        """Abre el PDF guardado (frente o vuelta) de la cola en el visor del SO."""
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+
         if not self._selected_cola_id:
-            self.set_status("⚠️ Selecciona una cola para vista previa", "warning")
+            self.set_status("⚠️ Selecciona una cola primero", "warning")
             return
 
         from credencializacion.db.engine import DatabaseSession
-        from credencializacion.db.models import ColaImpresion, ItemCola, Plantilla
-        from credencializacion.renderer.pdf_engine import PDFEngine
-        import tempfile
+        from credencializacion.db.models import ColaImpresion
+
+        try:
+            with DatabaseSession() as session:
+                cola = session.query(ColaImpresion).filter_by(
+                    id=self._selected_cola_id
+                ).first()
+                if cola is None:
+                    self.set_status("⚠️ Cola no encontrada", "warning")
+                    return
+                pdf_path = (
+                    cola.pdf_frente_path if cara == "frente" else cola.pdf_vuelta_path
+                )
+
+            cara_label = "frente" if cara == "frente" else "vuelta"
+            if not pdf_path or not Path(pdf_path).exists():
+                self.set_status(
+                    f"⚠️ No hay PDF de {cara_label} guardado para esta cola",
+                    "warning",
+                )
+                return
+
+            opened = QDesktopServices.openUrl(QUrl.fromLocalFile(str(pdf_path)))
+            if opened:
+                self.set_status(f"📄 Abriendo {cara_label} en el visor del sistema", "info", toast=False)
+            else:
+                self.set_status(f"❌ No se pudo abrir el PDF de {cara_label}", "error")
+        except Exception as e:
+            logger.error("Error al abrir PDF de cola: %s", e)
+            self.set_status(f"❌ Error al abrir PDF: {e}", "error")
+
+    def _mark_queue_ready(self) -> None:
+        """Marca las credenciales de la cola como 'Listas/Impresas' en la API.
+
+        Recolecta los ``student_id`` de los registros de la cola y hace el POST
+        a ``bulk-mark-ready`` en segundo plano. Al confirmar, marca la cola como
+        completada localmente.
+        """
+        if not self._selected_cola_id:
+            self.set_status("⚠️ Selecciona una cola primero", "warning")
+            return
+
+        from credencializacion.db.engine import DatabaseSession
+        from credencializacion.db.models import ColaImpresion, ItemCola
 
         try:
             with DatabaseSession() as session:
@@ -665,44 +677,92 @@ class PrintCenter(QWidget):
                     self.set_status("⚠️ La cola está vacía", "warning")
                     return
 
-                # Usar la plantilla del primer ítem
-                plantilla = items[0].plantilla
-                engine = PDFEngine(plantilla)
-
-                # Preparar pares (registro, plantilla)
-                render_items = [(item.registro, item.plantilla) for item in items]
-
-                # Overrides de imagen de fondo por multiplantillaje (por lado).
-                overrides_frente = self._compute_fondo_overrides(
-                    session, items, "frente"
-                )
-                overrides_vuelta = self._compute_fondo_overrides(
-                    session, items, "vuelta"
-                )
-
-                # Generar PDFs temporales
-                tmp_dir = Path(tempfile.mkdtemp(prefix="credencial_preview_"))
-                frentes_pdf = engine.render_queue(
-                    render_items, "frente", tmp_dir / "frentes.pdf",
-                    fondo_overrides=overrides_frente,
-                )
-                vueltas_pdf = engine.render_queue(
-                    render_items, "vuelta", tmp_dir / "vueltas.pdf",
-                    fondo_overrides=overrides_vuelta,
-                )
-
-            # Abrir diálogo de preview
-            from credencializacion.ui.dialogs.preview_dialog import PreviewDialog
-            dlg = PreviewDialog(
-                frentes_pdf=frentes_pdf,
-                vueltas_pdf=vueltas_pdf,
-                parent=self,
-            )
-            dlg.exec()
-
+                student_ids: list[int] = []
+                cliente_id = None
+                for it in items:
+                    reg = it.registro
+                    if reg is None:
+                        continue
+                    if cliente_id is None:
+                        cliente_id = reg.cliente_id
+                    sid = (reg.datos or {}).get("student_id")
+                    if sid in (None, ""):
+                        continue
+                    try:
+                        student_ids.append(int(sid))
+                    except (TypeError, ValueError):
+                        continue
         except Exception as e:
-            logger.error("Error en vista previa: %s", e)
-            self.set_status(f"❌ Error en vista previa: {e}", "error")
+            self.set_status(f"❌ Error al leer la cola: {e}", "error")
+            return
+
+        if not student_ids:
+            self.set_status(
+                "⚠️ Los registros no tienen student_id (vuelve a sincronizar)",
+                "warning",
+            )
+            return
+
+        base_url, api_key = self._client_api_credentials(cliente_id)
+
+        from credencializacion.ui.status_worker import BulkMarkWorker
+
+        cola_id = self._selected_cola_id
+        worker = BulkMarkWorker(base_url, api_key, "ready", student_ids)
+        self._mark_workers.append(worker)
+        self.set_status("🔔 Marcando credenciales como impresas...", "info", toast=False)
+
+        def _on_done(success: bool, message: str, updated: int) -> None:
+            if success:
+                self._mark_cola_completed(cola_id)
+                self.set_status(
+                    f"✅ {updated} credenciales marcadas como impresas", "success"
+                )
+                self.refresh_queues()
+            else:
+                self.set_status(
+                    f"⚠️ No se pudo actualizar el estatus en la API: {message}",
+                    "warning",
+                )
+            if worker in self._mark_workers:
+                self._mark_workers.remove(worker)
+
+        worker.done.connect(_on_done)
+        worker.start()
+
+    def _mark_cola_completed(self, cola_id: int) -> None:
+        """Marca la cola como completada localmente."""
+        from credencializacion.db.engine import DatabaseSession
+        from credencializacion.db.models import ColaImpresion
+
+        try:
+            with DatabaseSession() as session:
+                cola = session.query(ColaImpresion).get(cola_id)
+                if cola is not None:
+                    cola.estado = "completada"
+                    session.commit()
+        except Exception as e:  # noqa: BLE001
+            logger.error("No se pudo marcar la cola como completada: %s", e)
+
+    @staticmethod
+    def _client_api_credentials(cliente_id) -> tuple[str, str]:
+        """Devuelve (base_url, api_key) del Cliente, con fallback a constantes."""
+        base_url = "https://app.miescuela.net"
+        api_key = "7c9e6679-7425-40de-944b-e07fc1f90ae7"
+        if cliente_id is None:
+            return base_url, api_key
+        from credencializacion.db.engine import get_session
+        from credencializacion.db.models import Cliente
+
+        try:
+            with get_session() as session:
+                cliente = session.query(Cliente).get(cliente_id)
+                if cliente is not None:
+                    base_url = cliente.api_base_url or base_url
+                    api_key = cliente.api_key or api_key
+        except Exception:  # noqa: BLE001
+            pass
+        return base_url, api_key
 
     def _compute_fondo_overrides(self, session, items, cara: str) -> list[str | None]:
         """Calcula la imagen de fondo por ítem para un lado (multiplantillaje).
@@ -727,114 +787,6 @@ class PrintCenter(QWidget):
             else:
                 overrides.append(select_imagen(item.registro.datos or {}, config))
         return overrides
-
-    def _print_queue(self, cara: str) -> None:
-        """Genera PDF e imprime la cara indicada de la cola seleccionada.
-
-        Args:
-            cara: 'frente' o 'vuelta'.
-        """
-        if not self._selected_cola_id:
-            self.set_status("⚠️ Selecciona una cola para imprimir", "warning")
-            return
-
-        # Validar impresora
-        printer_name = self._combo_printer.currentText()
-        if (
-            not printer_name
-            or printer_name == "Seleccionar impresora..."
-        ):
-            self.set_status("⚠️ Selecciona una impresora", "warning")
-            return
-
-        from credencializacion.db.engine import DatabaseSession
-        from credencializacion.db.models import ColaImpresion, ItemCola
-        from credencializacion.renderer.pdf_engine import PDFEngine
-        from credencializacion.core.printer import print_pdf
-        import tempfile
-
-        try:
-            with DatabaseSession() as session:
-                cola = session.query(ColaImpresion).filter_by(
-                    id=self._selected_cola_id
-                ).first()
-                if not cola:
-                    return
-
-                items = (
-                    session.query(ItemCola)
-                    .filter_by(cola_id=cola.id)
-                    .order_by(ItemCola.orden)
-                    .all()
-                )
-                if not items:
-                    self.set_status("⚠️ La cola está vacía", "warning")
-                    return
-
-                # Mostrar progreso
-                self.show_progress(0, len(items))
-                self.set_status(
-                    f"🖨 Generando PDF de {cara}s ({len(items)} registros)...",
-                    "info",
-                    toast=False,
-                )
-
-                # Generar PDF
-                plantilla = items[0].plantilla
-                engine = PDFEngine(plantilla)
-                render_items = [(item.registro, item.plantilla) for item in items]
-
-                overrides = self._compute_fondo_overrides(session, items, cara)
-
-                tmp_dir = Path(tempfile.mkdtemp(prefix=f"credencial_{cara}_"))
-                pdf_path = engine.render_queue(
-                    render_items, cara, tmp_dir / f"{cara}s.pdf",
-                    fondo_overrides=overrides,
-                )
-
-                # Enviar a impresora
-                success = print_pdf(pdf_path, printer_name)
-
-                if success:
-                    # Actualizar estados
-                    new_item_estado = (
-                        "frente_impreso" if cara == "frente" else "vuelta_impresa"
-                    )
-                    for item in items:
-                        if cara == "frente" and item.estado_item == "pendiente":
-                            item.estado_item = new_item_estado
-                        elif cara == "vuelta" and item.estado_item == "frente_impreso":
-                            item.estado_item = "completado"
-
-                    # Actualizar estado de la cola
-                    if cara == "frente":
-                        cola.estado = "frentes_impresos"
-                    elif cara == "vuelta" and cola.estado == "frentes_impresos":
-                        cola.estado = "completada"
-                    cola.impresora = printer_name
-
-                    session.commit()
-
-                    cara_label = "Frentes" if cara == "frente" else "Vueltas"
-                    self.set_status(
-                        f"✅ {cara_label} enviados a '{printer_name}' ({len(items)} registros)",
-                        "success",
-                    )
-                else:
-                    self.set_status(
-                        f"❌ Error al enviar a impresora '{printer_name}'",
-                        "error",
-                    )
-
-                self.show_progress(len(items), len(items))
-                self._load_queue_detail(cola.id)
-                self.refresh_queues()
-
-        except Exception as e:
-            logger.error("Error al imprimir cola: %s", e)
-            self.set_status(f"❌ Error de impresión: {e}", "error")
-        finally:
-            self.hide_progress()
 
     # ── Métodos públicos ───────────────────────────────────────────
 
@@ -882,33 +834,9 @@ class PrintCenter(QWidget):
 
                     self._queue_list.addItem(item)
 
-            # Cargar impresoras
-            self._load_printers()
-
         except Exception as e:
             logger.error("Error al cargar colas: %s", e)
             self.set_status(f"❌ Error al cargar colas: {e}", "error")
-
-    def _load_printers(self) -> None:
-        """Carga las impresoras del sistema en el combo."""
-        from credencializacion.core.printer import get_system_printers, get_default_printer
-
-        current = self._combo_printer.currentText()
-        self._combo_printer.clear()
-        self._combo_printer.addItem("Seleccionar impresora...")
-
-        printers = get_system_printers()
-        default = get_default_printer()
-
-        for name in printers:
-            label = f"⭐ {name}" if name == default else name
-            self._combo_printer.addItem(label, userData=name)
-
-        # Restaurar selección previa si existe
-        if current and current != "Seleccionar impresora...":
-            idx = self._combo_printer.findText(current)
-            if idx >= 0:
-                self._combo_printer.setCurrentIndex(idx)
 
     def set_status(self, message: str, level: str = "info", toast: bool = True) -> None:
         """Actualiza la barra de estado y, opcionalmente, muestra un toast.

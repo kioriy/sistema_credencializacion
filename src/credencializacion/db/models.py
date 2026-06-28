@@ -276,6 +276,11 @@ class ColaImpresion(Base):
         Integer, nullable=False, default=0
     )
 
+    # Rutas a los PDFs generados al enviar la cola al Centro de Impresión.
+    # Persisten en una carpeta estable (build-safe) para poder reabrirlos.
+    pdf_frente_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    pdf_vuelta_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now()
     )

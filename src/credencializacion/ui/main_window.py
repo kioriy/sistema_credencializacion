@@ -120,7 +120,6 @@ class MainWindow(QMainWindow):
 
         # Conectar botones de toolbar con handlers del ControlPanel
         self.btn_print_front.clicked.connect(self._control_panel._on_print_front)
-        self.btn_print_back.clicked.connect(self._control_panel._on_print_back)
         self.btn_preview.clicked.connect(self._control_panel._on_preview)
         self.btn_add_queue.clicked.connect(self._control_panel._add_selected_to_queue)
         self.btn_sync.clicked.connect(self._control_panel._on_sync_api)
@@ -131,8 +130,7 @@ class MainWindow(QMainWindow):
         # 0 — Panel de Control
         tb_control = self._make_toolbar_frame()
         tb_layout = tb_control.layout()
-        self.btn_print_front = self._make_toolbar_btn("fa5s.print", "Imprimir Frente", primary=True)
-        self.btn_print_back = self._make_toolbar_btn("fa5s.print", "Imprimir Vuelta", primary=True)
+        self.btn_print_front = self._make_toolbar_btn("fa5s.paper-plane", "Agregar al Centro de Impresión", primary=True)
         self.btn_preview = self._make_toolbar_btn("fa5s.eye", "Vista Previa", primary=False)
         
         self.btn_sync = QToolButton()
@@ -172,7 +170,6 @@ class MainWindow(QMainWindow):
         )
 
         tb_layout.addWidget(self.btn_print_front)
-        tb_layout.addWidget(self.btn_print_back)
         tb_layout.addWidget(self.btn_preview)
 
         self.btn_add_queue = self._make_toolbar_btn("fa5s.plus-circle", "Agregar a Cola", primary=False)

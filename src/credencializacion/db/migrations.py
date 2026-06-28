@@ -23,7 +23,34 @@ def init_database() -> None:
     engine = get_engine()
     Base.metadata.create_all(engine)
     _drop_legacy_multiplantillaje(engine)
+    _add_cola_pdf_columns(engine)
     _migrate_plantilla_base()
+
+
+def _add_cola_pdf_columns(engine) -> None:
+    """Agrega las columnas de rutas de PDF a `colas_impresion` si faltan.
+
+    ``create_all`` no altera tablas existentes, por lo que en bases de datos
+    previas hay que añadir las columnas manualmente. Es idempotente.
+    """
+    inspector = inspect(engine)
+    if "colas_impresion" not in set(inspector.get_table_names()):
+        return
+    existentes = {c["name"] for c in inspector.get_columns("colas_impresion")}
+    faltantes = [
+        col for col in ("pdf_frente_path", "pdf_vuelta_path") if col not in existentes
+    ]
+    if not faltantes:
+        return
+    raw = engine.raw_connection()
+    try:
+        cur = raw.cursor()
+        for col in faltantes:
+            cur.execute(f"ALTER TABLE colas_impresion ADD COLUMN {col} VARCHAR(500)")
+        raw.commit()
+        cur.close()
+    finally:
+        raw.close()
 
 
 def _drop_legacy_multiplantillaje(engine) -> None:

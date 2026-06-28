@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from credencializacion.core.printer import get_default_printer, get_system_printers
+from credencializacion.core.printer import get_default_printer, get_system_printers  # noqa: F401 (compat)
 
 logger = logging.getLogger(__name__)
 
@@ -204,7 +204,6 @@ class PreviewDialog(QDialog):
         self._vueltas_pdf = vueltas_pdf
 
         self._setup_ui()
-        self._load_printers()
 
     # ── UI ─────────────────────────────────────────────────────────────
 
@@ -270,51 +269,9 @@ class PreviewDialog(QDialog):
         else:
             main_layout.addWidget(self._tabs, 1)
 
-        # ── Barra de impresión ─────────────────────────────────────────
-        print_bar = QHBoxLayout()
-        print_bar.setSpacing(10)
-
-        printer_icon = QLabel()
-        printer_icon.setPixmap(
-            qta.icon("fa5s.print", color=TEXT_DARK).pixmap(18, 18)
-        )
-        print_bar.addWidget(printer_icon)
-
-        lbl_printer = QLabel("Impresora:")
-        lbl_printer.setStyleSheet(f"color: {TEXT_DARK}; font-weight: 600; font-size: 13px;")
-        print_bar.addWidget(lbl_printer)
-
-        self._printer_combo = QComboBox()
-        self._printer_combo.setMinimumWidth(220)
-        self._printer_combo.setStyleSheet(
-            f"""
-            QComboBox {{
-                border: 1px solid {BORDER};
-                border-radius: 6px;
-                padding: 6px 10px;
-                font-size: 13px;
-                color: {TEXT_DARK};
-                background: {CARD_BG};
-            }}
-            QComboBox:focus {{
-                border-color: {PRIMARY};
-            }}
-            QComboBox::drop-down {{
-                border: none;
-                width: 28px;
-            }}
-            QComboBox::down-arrow {{
-                image: none;
-                border-left: 5px solid transparent;
-                border-right: 5px solid transparent;
-                border-top: 5px solid {TEXT_LIGHT};
-                width: 0;
-                height: 0;
-                margin-right: 8px;
-            }}
-            """
-        )
-        print_bar.addWidget(self._printer_combo, 1)
+        # ── Barra de acciones ──────────────────────────────────────────
+        action_bar = QHBoxLayout()
+        action_bar.setSpacing(10)
 
         btn_style = f"""
             QPushButton {{
@@ -338,62 +295,29 @@ class PreviewDialog(QDialog):
             }}
         """
 
+        # Abrir Frente / Abrir Vuelta: abren el PDF respectivo en el visor del SO.
         self._btn_print_frentes = QPushButton(
-            qta.icon("fa5s.print", color="#FFFFFF"), "  Imprimir Frentes"
+            qta.icon("fa5s.external-link-alt", color="#FFFFFF"), "  Abrir Frente"
         )
         self._btn_print_frentes.setStyleSheet(btn_style)
         self._btn_print_frentes.setEnabled(
             self._frentes_pdf is not None and self._frentes_pdf.exists()
         )
         self._btn_print_frentes.clicked.connect(self._on_print_frentes)
-        print_bar.addWidget(self._btn_print_frentes)
+        action_bar.addWidget(self._btn_print_frentes)
 
         self._btn_print_vueltas = QPushButton(
-            qta.icon("fa5s.print", color="#FFFFFF"), "  Imprimir Vueltas"
+            qta.icon("fa5s.external-link-alt", color="#FFFFFF"), "  Abrir Vuelta"
         )
         self._btn_print_vueltas.setStyleSheet(btn_style)
         self._btn_print_vueltas.setEnabled(
             self._vueltas_pdf is not None and self._vueltas_pdf.exists()
         )
         self._btn_print_vueltas.clicked.connect(self._on_print_vueltas)
-        print_bar.addWidget(self._btn_print_vueltas)
+        action_bar.addWidget(self._btn_print_vueltas)
 
-        main_layout.addLayout(print_bar)
+        action_bar.addStretch()
 
-        # ── Botón cerrar ───────────────────────────────────────────────
-        close_bar = QHBoxLayout()
-
-        # Abrir el PDF de la pestaña activa en el visor por defecto del SO.
-        self._btn_open_external = QPushButton(
-            qta.icon("fa5s.external-link-alt", color=TEXT_DARK),
-            "  Abrir en visor del sistema",
-        )
-        self._btn_open_external.setStyleSheet(
-            f"""
-            QPushButton {{
-                background: {CARD_BG};
-                color: {TEXT_DARK};
-                border: 1px solid {BORDER};
-                border-radius: 6px;
-                padding: 8px 18px;
-                font-size: 13px;
-                font-weight: 600;
-            }}
-            QPushButton:hover {{
-                background: {MAIN_BG};
-                border-color: {TEXT_LIGHT};
-            }}
-            QPushButton:disabled {{
-                color: {TEXT_LIGHT};
-                border-color: {BORDER};
-            }}
-            """
-        )
-        self._btn_open_external.setEnabled(self._tabs.count() > 0)
-        self._btn_open_external.clicked.connect(self._open_in_system_viewer)
-        close_bar.addWidget(self._btn_open_external)
-
-        close_bar.addStretch()
         btn_close = QPushButton("Cerrar")
         btn_close.setStyleSheet(
             f"""
@@ -413,62 +337,26 @@ class PreviewDialog(QDialog):
             """
         )
         btn_close.clicked.connect(self.close)
-        close_bar.addWidget(btn_close)
-        main_layout.addLayout(close_bar)
+        action_bar.addWidget(btn_close)
+        main_layout.addLayout(action_bar)
 
     # ── Impresoras ─────────────────────────────────────────────────────
 
-    def _load_printers(self) -> None:
-        """Carga las impresoras del sistema en el combo box."""
-        self._printer_combo.clear()
-        printers = get_system_printers()
-
-        if not printers:
-            self._printer_combo.addItem("— Sin impresoras disponibles —")
-            self._btn_print_frentes.setEnabled(False)
-            self._btn_print_vueltas.setEnabled(False)
-            return
-
-        self._printer_combo.addItems(printers)
-
-        default = get_default_printer()
-        if default and default in printers:
-            self._printer_combo.setCurrentText(default)
-
-    def _selected_printer(self) -> str | None:
-        """Devuelve el nombre de la impresora seleccionada o None."""
-        text = self._printer_combo.currentText()
-        if text.startswith("—"):
-            return None
-        return text
-
-    def _current_pdf_path(self) -> Path | None:
-        """PDF de la pestaña actualmente visible, si existe."""
-        widget = self._tabs.currentWidget() if self._tabs.count() else None
-        pdf = getattr(widget, "pdf_path", None)
-        if pdf and Path(pdf).exists():
-            return Path(pdf)
-        return None
-
-    def _open_in_system_viewer(self) -> None:
-        """Abre el PDF de la pestaña activa en el visor por defecto del SO."""
-        pdf = self._current_pdf_path()
-        if pdf is None:
+    def _open_pdf_in_viewer(self, pdf: Path | None) -> None:
+        """Abre el PDF indicado en el visor por defecto del SO."""
+        if pdf is None or not Path(pdf).exists():
+            logger.warning("PDF no disponible para abrir: %s", pdf)
             return
         opened = QDesktopServices.openUrl(QUrl.fromLocalFile(str(pdf)))
         if not opened:
             logger.warning("No se pudo abrir el PDF en el visor del sistema: %s", pdf)
 
-    # ── Slots de impresión ─────────────────────────────────────────────
+    # ── Slots ───────────────────────────────────────────────────────────
 
     def _on_print_frentes(self) -> None:
-        """Maneja clic en Imprimir Frentes."""
-        printer = self._selected_printer()
-        if printer and self._frentes_pdf:
-            self.print_requested.emit(self._frentes_pdf, printer)
+        """Abre el PDF de frentes en el visor del sistema."""
+        self._open_pdf_in_viewer(self._frentes_pdf)
 
     def _on_print_vueltas(self) -> None:
-        """Maneja clic en Imprimir Vueltas."""
-        printer = self._selected_printer()
-        if printer and self._vueltas_pdf:
-            self.print_requested.emit(self._vueltas_pdf, printer)
+        """Abre el PDF de vueltas en el visor del sistema."""
+        self._open_pdf_in_viewer(self._vueltas_pdf)
