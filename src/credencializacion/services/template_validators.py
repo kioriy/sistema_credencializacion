@@ -25,7 +25,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from credencializacion.services.template_assignment import ReglaDTO, normalize
+from credencializacion.services.image_selection import normalize
 
 # Límites de longitud por requisito (tras recortar espacios circundantes).
 ATRIBUTO_MIN_LEN = 1

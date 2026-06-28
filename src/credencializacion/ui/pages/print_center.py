@@ -672,13 +672,23 @@ class PrintCenter(QWidget):
                 # Preparar pares (registro, plantilla)
                 render_items = [(item.registro, item.plantilla) for item in items]
 
+                # Overrides de imagen de fondo por multiplantillaje (por lado).
+                overrides_frente = self._compute_fondo_overrides(
+                    session, items, "frente"
+                )
+                overrides_vuelta = self._compute_fondo_overrides(
+                    session, items, "vuelta"
+                )
+
                 # Generar PDFs temporales
                 tmp_dir = Path(tempfile.mkdtemp(prefix="credencial_preview_"))
                 frentes_pdf = engine.render_queue(
-                    render_items, "frente", tmp_dir / "frentes.pdf"
+                    render_items, "frente", tmp_dir / "frentes.pdf",
+                    fondo_overrides=overrides_frente,
                 )
                 vueltas_pdf = engine.render_queue(
-                    render_items, "vuelta", tmp_dir / "vueltas.pdf"
+                    render_items, "vuelta", tmp_dir / "vueltas.pdf",
+                    fondo_overrides=overrides_vuelta,
                 )
 
             # Abrir diálogo de preview
@@ -693,6 +703,30 @@ class PrintCenter(QWidget):
         except Exception as e:
             logger.error("Error en vista previa: %s", e)
             self.set_status(f"❌ Error en vista previa: {e}", "error")
+
+    def _compute_fondo_overrides(self, session, items, cara: str) -> list[str | None]:
+        """Calcula la imagen de fondo por ítem para un lado (multiplantillaje).
+
+        Para cada ítem, si su diseño tiene `ConfiguracionLado` para ese lado, se
+        evalúan las variantes contra los datos del registro y se devuelve la ruta
+        elegida; si no hay configuración, se devuelve ``None`` (el render usa la
+        imagen base del diseño). La config de cada diseño se cachea por id.
+        """
+        from credencializacion.db.repositories import LadoConfigRepository
+        from credencializacion.services.image_selection import select_imagen
+
+        cache: dict[int, object] = {}
+        overrides: list[str | None] = []
+        for item in items:
+            pid = item.plantilla_id
+            if pid not in cache:
+                cache[pid] = LadoConfigRepository.get_config_lado(session, pid, cara)
+            config = cache[pid]
+            if config is None:
+                overrides.append(None)
+            else:
+                overrides.append(select_imagen(item.registro.datos or {}, config))
+        return overrides
 
     def _print_queue(self, cara: str) -> None:
         """Genera PDF e imprime la cara indicada de la cola seleccionada.
@@ -750,9 +784,12 @@ class PrintCenter(QWidget):
                 engine = PDFEngine(plantilla)
                 render_items = [(item.registro, item.plantilla) for item in items]
 
+                overrides = self._compute_fondo_overrides(session, items, cara)
+
                 tmp_dir = Path(tempfile.mkdtemp(prefix=f"credencial_{cara}_"))
                 pdf_path = engine.render_queue(
-                    render_items, cara, tmp_dir / f"{cara}s.pdf"
+                    render_items, cara, tmp_dir / f"{cara}s.pdf",
+                    fondo_overrides=overrides,
                 )
 
                 # Enviar a impresora

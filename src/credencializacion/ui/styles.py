@@ -87,10 +87,13 @@ def get_main_stylesheet() -> str:
     /* ================================================================
        TOOLTIPS
        ================================================================ */
+    /* En macOS el estilo nativo ignora `background-color` del QSS en QToolTip
+       (usa fondo claro nativo) pero sí aplica `color`; al forzar texto blanco
+       quedaba blanco sobre blanco. Se deja sin regla de color/fondo para que el
+       texto herede el color oscuro del selector global `*` sobre el fondo claro
+       nativo, garantizando contraste legible en todas las plataformas. */
     QToolTip {{
-        background-color: {c["text"]};
-        color: {c["text_white"]};
-        border: none;
+        border: 1px solid {c["border"]};
         border-radius: 4px;
         padding: 6px 10px;
         font-size: {FONT_SIZE_SM};

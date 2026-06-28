@@ -67,6 +67,17 @@ def create_app(argv: Sequence[str] | None = None) -> QApplication:
     # --- Stylesheet global ---
     app.setStyleSheet(get_main_stylesheet())
 
+    # --- Paleta de tooltips (contraste legible, también en estilo nativo macOS) ---
+    # El estilo nativo respeta ToolTipBase/ToolTipText de la paleta; se fija un
+    # fondo claro con texto oscuro para garantizar contraste.
+    from PySide6.QtGui import QColor, QPalette
+    from credencializacion.ui.styles import COLORS
+
+    _pal = app.palette()
+    _pal.setColor(QPalette.ColorRole.ToolTipBase, QColor("#FFFFFF"))
+    _pal.setColor(QPalette.ColorRole.ToolTipText, QColor(COLORS["text"]))
+    app.setPalette(_pal)
+
     # --- Ícono de la app ---
     icon_path = get_icons_dir() / "app_icon.png"
     if icon_path.exists():

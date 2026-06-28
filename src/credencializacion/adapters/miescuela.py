@@ -47,7 +47,9 @@ def _build_session(retries: int = _DEFAULT_RETRIES) -> requests.Session:
 _STUDENT_COLUMNS: list[str] = [
     "nombre",
     "apellido",
+    "nombre_completo",
     "matricula",
+    "access_token",
     "grado",
     "grupo",
     "turno",
@@ -57,7 +59,6 @@ _STUDENT_COLUMNS: list[str] = [
     "photo_url",
     "estado_credencial",
     "reemplazos",
-    "personas_autorizadas",
     "enrollment_code",
 ]
 
@@ -215,24 +216,61 @@ class MiEscuelaAdapter(DataAdapter):
 
     @staticmethod
     def _flatten_record(raw: dict) -> dict:
-        """Aplana un registro JSON a columnas estándar."""
+        """Aplana un registro JSON del API a atributos planos editables.
+
+        Conserva los atributos estándar y, además, aplana:
+        - ``access_token`` del alumno (usable como ``{access_token}``).
+        - Personas autorizadas → ``autorizado_{i}_nombre/_telefono/_parentesco/``
+          ``_principal/_foto`` (la foto es un atributo de imagen).
+        - ``student_record`` (campos configurables por escuela) → cada clave
+          escalar se expone como atributo dinámico, sin sobrescribir las
+          estándar.
+        El nombre completo se precalcula para mostrarlo en el diseñador.
+        """
         classroom = raw.get("classroom") or {}
         school = raw.get("school") or {}
         authorized = raw.get("authorized_persons") or []
 
-        return {
-            "nombre": raw.get("first_name", ""),
-            "apellido": raw.get("last_name", ""),
+        nombre = raw.get("first_name", "") or ""
+        apellido = raw.get("last_name", "") or ""
+        record: dict[str, Any] = {
+            "nombre": nombre,
+            "apellido": apellido,
+            "nombre_completo": f"{nombre} {apellido}".strip(),
             "matricula": raw.get("enrollment_code", ""),
+            "access_token": raw.get("access_token", "") or "",
             "grado": classroom.get("grade", ""),
             "grupo": classroom.get("group_letter", ""),
             "turno": classroom.get("shift", ""),
             "nivel_escolar": classroom.get("school_level", ""),
             "escuela": school.get("name", ""),
-            "logo_escuela": school.get("logo_url", ""),
-            "photo_url": raw.get("photo_url", ""),
+            "logo_escuela": school.get("logo_url", "") or "",
+            "photo_url": raw.get("photo_url", "") or "",
             "estado_credencial": raw.get("credential_status", ""),
             "reemplazos": raw.get("credential_replacement_count", 0),
-            "personas_autorizadas": authorized,
             "enrollment_code": raw.get("enrollment_code", ""),
         }
+
+        # Personas autorizadas → atributos individuales (incluye foto = imagen).
+        for i, persona in enumerate(authorized, start=1):
+            if not isinstance(persona, dict):
+                continue
+            record[f"autorizado_{i}_nombre"] = persona.get("full_name", "") or ""
+            record[f"autorizado_{i}_telefono"] = persona.get("phone", "") or ""
+            record[f"autorizado_{i}_parentesco"] = persona.get("relationship", "") or ""
+            record[f"autorizado_{i}_principal"] = (
+                "sí" if persona.get("is_primary") else "no"
+            )
+            record[f"autorizado_{i}_foto"] = persona.get("photo_url", "") or ""
+
+        # student_record: campos configurables por escuela (dinámicos). Se
+        # aplanan las claves escalares sin sobrescribir atributos ya presentes.
+        student_record = raw.get("student_record")
+        if isinstance(student_record, dict):
+            for key, value in student_record.items():
+                if not isinstance(key, str) or key in record:
+                    continue
+                if isinstance(value, (str, int, float, bool)) or value is None:
+                    record[key] = "" if value is None else value
+
+        return record

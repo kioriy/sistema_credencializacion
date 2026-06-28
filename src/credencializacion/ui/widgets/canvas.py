@@ -110,8 +110,9 @@ class GraphicElement(QGraphicsItem):
 
         if test_text:
             # Si hay dato de prueba, mostrarlo con el color real
+            from credencializacion.services.text_rules import apply_text_rule
             color = QColor(props.get("color", "#171A2B"))
-            texto = test_text
+            texto = apply_text_rule(test_text, props.get("text_rule", ""))
         elif elem_type == "composite":
             # Texto compuesto: mostrar la plantilla o una muestra
             tmpl = props.get("composite_template", "")
@@ -210,11 +211,19 @@ class GraphicElement(QGraphicsItem):
         painter.setPen(QColor("#64748B"))
         painter.setFont(QFont("Inter", 10))
         
-        if self._data.get("type") == "image":
-            img_src = props.get("image_source", "Estudiante")
-            label = f"🖼️ {img_src}"
-        elif self._data.get("type") == "photo_path":
-            label = f"📷 {self._data.get('label', 'Foto')}"
+        if self._data.get("type") in ("image", "photo_path"):
+            from pathlib import Path
+            label_txt = (props.get("label") or "").strip()
+            if not label_txt:
+                campo = self._data.get("campo_dato") or ""
+                src = props.get("src") or ""
+                if campo:
+                    label_txt = str(campo)
+                elif src:
+                    label_txt = Path(str(src)).name
+                else:
+                    label_txt = "Imagen"
+            label = f"🖼 {label_txt}"
         elif self._data.get("type") == "qr":
             qr_type = props.get("qr_type", "Atributo Simple")
             if qr_type == "Texto Compuesto":

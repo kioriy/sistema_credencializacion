@@ -72,8 +72,27 @@ _ANIM_OUT_MS = 320    # duración animación salida
 _WIDTH       = 340    # ancho del toast
 _HEIGHT      = 68     # alto del toast
 _MARGIN_RIGHT = 20    # margen derecho desde el borde de la ventana
-_MARGIN_BOTTOM = 20   # margen inferior base
+_MARGIN_TOP  = 20     # margen superior desde el borde de la ventana
+_MARGIN_BOTTOM = 20   # margen inferior base (no usado en modo superior)
 _SPACING      = 10    # espacio entre toasts apilados
+
+
+def _anchor_geometry() -> "QRect":
+    """Geometría (coords globales) a la que se anclan los toasts.
+
+    Usa el área de la ventana principal de la app para que los toasts aparezcan
+    **dentro** de la aplicación (esquina superior derecha). Si no hay ventana
+    principal visible, cae al área disponible de la pantalla.
+    """
+    app = QApplication.instance()
+    if app is not None:
+        from PySide6.QtWidgets import QMainWindow
+
+        for w in app.topLevelWidgets():
+            if isinstance(w, QMainWindow) and w.isVisible():
+                return w.geometry()
+    screen = QApplication.primaryScreen()
+    return screen.availableGeometry() if screen else QRect(0, 0, 1920, 1080)
 
 
 class ToastWidget(QWidget):
@@ -100,6 +119,8 @@ class ToastWidget(QWidget):
         self._build_ui()
         self._anim_in: QPropertyAnimation | None = None
         self._anim_out: QPropertyAnimation | None = None
+        self._reposition_anim: QPropertyAnimation | None = None
+        self._closing: bool = False
         self._close_timer = QTimer(self)
         self._close_timer.setSingleShot(True)
         self._close_timer.timeout.connect(self._start_fade_out)
@@ -177,10 +198,8 @@ class ToastWidget(QWidget):
     # --------------------------------------------------------------- slots
     def show_animated(self, target_pos: QPoint) -> None:
         """Muestra el toast con animación de deslizamiento desde la derecha."""
-        screen = QApplication.primaryScreen()
-        screen_geo = screen.availableGeometry() if screen else QRect(0, 0, 1920, 1080)
-
-        start_pos = QPoint(screen_geo.right() + 20, target_pos.y())
+        geo = _anchor_geometry()
+        start_pos = QPoint(geo.right() + 20, target_pos.y())
 
         self.move(start_pos)
         self.show()
@@ -196,15 +215,24 @@ class ToastWidget(QWidget):
 
     def _start_fade_out(self) -> None:
         """Inicia animación de desvanecimiento y slide hacia la derecha."""
+        if self._closing:
+            return
+        self._closing = True
         self._close_timer.stop()
 
-        screen = QApplication.primaryScreen()
-        screen_geo = screen.availableGeometry() if screen else QRect(0, 0, 1920, 1080)
+        # Detener cualquier animación de reposicionamiento en curso para que no
+        # compita con la salida (dos animaciones sobre `pos` se interfieren y la
+        # salida nunca termina, dejando el toast fijo en pantalla).
+        if self._reposition_anim is not None:
+            self._reposition_anim.stop()
+            self._reposition_anim = None
+
+        geo = _anchor_geometry()
 
         self._anim_out = QPropertyAnimation(self, b"pos", self)
         self._anim_out.setDuration(_ANIM_OUT_MS)
         self._anim_out.setStartValue(self.pos())
-        self._anim_out.setEndValue(QPoint(screen_geo.right() + 20, self.pos().y()))
+        self._anim_out.setEndValue(QPoint(geo.right() + 20, self.pos().y()))
         self._anim_out.setEasingCurve(QEasingCurve.Type.InCubic)
         self._anim_out.finished.connect(self._on_closed)
         self._anim_out.start()
@@ -234,7 +262,7 @@ class ToastManager:
 
     # ---------------------------------------------------------------- API
     def show_toast(self, message: str, level: str = "info") -> None:
-        """Muestra un toast en la esquina inferior-derecha de la pantalla."""
+        """Muestra un toast en la esquina superior-derecha de la ventana."""
         toast = ToastWidget(message, level)
         toast.closed.connect(self._on_toast_closed)
         self._active.append(toast)
@@ -242,25 +270,31 @@ class ToastManager:
 
     # ----------------------------------------------------------- internals
     def _reposition_all(self) -> None:
-        """Recalcula la posición de todos los toasts activos (apilados de abajo hacia arriba)."""
-        screen = QApplication.primaryScreen()
-        if screen is None:
-            return
-        geo = screen.availableGeometry()
+        """Recalcula la posición de los toasts (apilados de arriba hacia abajo).
+
+        Se anclan a la esquina superior derecha del área de la ventana principal
+        (dentro de la app); el más reciente queda debajo del anterior. Los toasts
+        que ya están cerrándose se excluyen para no interferir con su animación
+        de salida.
+        """
+        geo = _anchor_geometry()
 
         x = geo.right() - _WIDTH - _MARGIN_RIGHT
-        y_base = geo.bottom() - _MARGIN_BOTTOM
+        y_top = geo.top() + _MARGIN_TOP
 
-        for i, toast in enumerate(reversed(self._active)):
-            y = y_base - (i * (_HEIGHT + _SPACING)) - _HEIGHT
+        visibles = [t for t in self._active if not getattr(t, "_closing", False)]
+        for i, toast in enumerate(visibles):
+            y = y_top + i * (_HEIGHT + _SPACING)
             target = QPoint(x, y)
 
             if toast.isVisible():
-                # Ya visible → mover suavemente
+                # Ya visible → mover suavemente (guardado como atributo para
+                # poder detenerlo si el toast empieza a cerrarse).
                 anim = QPropertyAnimation(toast, b"pos", toast)
                 anim.setDuration(200)
                 anim.setEndValue(target)
                 anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+                toast._reposition_anim = anim
                 anim.start()
             else:
                 # Nuevo → mostrar con animación de entrada

@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QColorDialog,
     QStackedWidget,
+    QCheckBox,
 )
 
 from credencializacion.ui.widgets.layers_panel import LayersPanel
@@ -92,7 +93,7 @@ class CanvasToolbar(QWidget):
     # Los campos (4ta columna) coinciden exactamente con los keys del registro
     DEFAULT_ATTRIBUTES = [
         ("composite",  "📝",  "Texto Compuesto",    "composite"),
-        ("photo_path", "📷",  "Foto Estudiante",     "photo_url"),
+        ("photo_path", "🖼",  "Imagen",              "photo_url"),
         ("text",       "👤",  "Nombre",              "nombre"),
         ("text",       "👤",  "Apellidos",           "apellido"),
         ("text",       "🏢",  "Escuela",             "escuela"),
@@ -323,6 +324,8 @@ class PropertiesPanel(QWidget):
     """
 
     property_changed = Signal(str, object)
+    # Solicita al editor abrir el explorador para elegir un archivo de imagen.
+    image_file_requested = Signal()
 
     # Mapeo índice del combo de alineación → valor almacenado en properties.
     _ALIGN_VALUES = ["left", "center", "right"]
@@ -331,6 +334,7 @@ class PropertiesPanel(QWidget):
         super().__init__(parent)
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
         self._current_element = None
+        self._img_attributes: list[str] = []
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -353,11 +357,14 @@ class PropertiesPanel(QWidget):
         lbl_title.setFont(QFont("Inter", 12, QFont.Weight.Bold))
         lbl_title.setStyleSheet(f"color: {TEXT_DARK};")
         title_layout.addWidget(lbl_title)
-        title_layout.addStretch()
-        
+
         self._lbl_element_type = QLabel("-")
-        self._lbl_element_type.setStyleSheet(f"color: {PRIMARY}; font-weight: bold; font-size: 11px;")
+        self._lbl_element_type.setStyleSheet(
+            f"color: {PRIMARY}; font-weight: bold; font-size: 11px; "
+            "margin-left: 8px;"
+        )
         title_layout.addWidget(self._lbl_element_type)
+        title_layout.addStretch()
         layout.addLayout(title_layout)
 
         # Contenedor principal de propiedades
@@ -430,6 +437,16 @@ class PropertiesPanel(QWidget):
         )
         self._form.addRow("Tamaño:", self._spin_font_size)
 
+        # Negrita
+        self._chk_bold = QCheckBox("Negrita")
+        self._chk_bold.setStyleSheet(f"color: {TEXT_DARK}; font-size: 12px;")
+        self._chk_bold.toggled.connect(
+            lambda checked: self.property_changed.emit(
+                "font_weight", "bold" if checked else "normal"
+            )
+        )
+        self._form.addRow("Estilo:", self._chk_bold)
+
         # Color
         self._btn_color = QPushButton("  #171A2B")
         self._btn_color.setStyleSheet(f"""
@@ -495,6 +512,48 @@ class PropertiesPanel(QWidget):
             lambda v: self.property_changed.emit("composite_template", v)
         )
         self._row_comp = self._f_dyn.addRow("Plantilla:", self._edit_composite)
+
+        # Regla de transformación de texto (abreviar, primer nombre, etc.)
+        from credencializacion.services.text_rules import TEXT_RULES
+        self._combo_text_rule = QComboBox()
+        self._combo_text_rule.setStyleSheet(self._input_style())
+        for _rule in TEXT_RULES:
+            self._combo_text_rule.addItem(_rule["label"], _rule["id"])
+        self._combo_text_rule.currentIndexChanged.connect(
+            lambda _i: self.property_changed.emit(
+                "text_rule", self._combo_text_rule.currentData() or ""
+            )
+        )
+        self._row_text_rule = self._f_dyn.addRow("Regla de texto:", self._combo_text_rule)
+
+        # ── Origen de imagen (solo elementos imagen) ──────────────────────
+        self._combo_img_source = QComboBox()
+        self._combo_img_source.addItems(["Atributo", "Archivo"])
+        self._combo_img_source.setStyleSheet(self._input_style())
+        self._combo_img_source.currentTextChanged.connect(self._on_img_source_changed)
+        self._row_img_source = self._f_dyn.addRow("Origen:", self._combo_img_source)
+
+        self._edit_img_label = QLineEdit()
+        self._edit_img_label.setPlaceholderText("(opcional; por defecto el origen)")
+        self._edit_img_label.setStyleSheet(self._input_style())
+        self._edit_img_label.textChanged.connect(
+            lambda v: self.property_changed.emit("label", v)
+        )
+        self._row_img_label = self._f_dyn.addRow("Etiqueta:", self._edit_img_label)
+
+        self._combo_img_attr = QComboBox()
+        self._combo_img_attr.setStyleSheet(self._input_style())
+        self._combo_img_attr.currentIndexChanged.connect(
+            lambda _i: self.property_changed.emit(
+                "campo_dato", self._combo_img_attr.currentData() or ""
+            )
+        )
+        self._row_img_attr = self._f_dyn.addRow("Atributo imagen:", self._combo_img_attr)
+
+        self._btn_img_file = QPushButton("Elegir archivo…")
+        self._btn_img_file.setStyleSheet(self._input_style())
+        self._btn_img_file.clicked.connect(self.image_file_requested.emit)
+        self._row_img_file = self._f_dyn.addRow("Archivo:", self._btn_img_file)
 
         self._form.addRow(self._w_dynamic_group)
 
@@ -597,10 +656,19 @@ class PropertiesPanel(QWidget):
         self._f_dyn.setRowVisible(self._edit_test_text, False)
         self._f_dyn.setRowVisible(self._edit_composite, False)
         self._f_dyn.setRowVisible(self._combo_align, False)
+        self._f_dyn.setRowVisible(self._combo_img_source, False)
+        self._f_dyn.setRowVisible(self._combo_img_attr, False)
+        self._f_dyn.setRowVisible(self._btn_img_file, False)
+        self._f_dyn.setRowVisible(self._edit_img_label, False)
+        self._f_dyn.setRowVisible(self._combo_text_rule, False)
+        # Por defecto, mostrar las filas de fuente (se ocultan solo en imagen).
+        for _w in (self._combo_font, self._spin_font_size, self._chk_bold, self._btn_color):
+            self._form.setRowVisible(_w, True)
 
         # Bloquear señales
         for widget in (self._spin_x, self._spin_y, self._spin_w, self._spin_h, 
-                       self._combo_font, self._spin_font_size, self._combo_render_as,
+                       self._combo_font, self._spin_font_size, self._chk_bold,
+                       self._combo_render_as,
                        self._combo_barcode_format, self._edit_test_text, self._edit_composite,
                        self._combo_align):
             widget.blockSignals(True)
@@ -612,8 +680,10 @@ class PropertiesPanel(QWidget):
 
         if elem_type in ("text", "composite"):
             self._w_dynamic_group.setVisible(True)
+            self._f_dyn.setRowVisible(self._combo_render_as, True)
             self._combo_font.setCurrentText(props.get("font_family", "Inter"))
             self._spin_font_size.setValue(props.get("font_size", 12))
+            self._chk_bold.setChecked(props.get("font_weight", "normal") == "bold")
             
             render_as = props.get("render_as", "Texto")
             self._combo_render_as.setCurrentText(render_as)
@@ -632,13 +702,61 @@ class PropertiesPanel(QWidget):
                     self._combo_align.setCurrentIndex(self._ALIGN_VALUES.index(alignment))
                 except ValueError:
                     self._combo_align.setCurrentIndex(0)
+
+                # Regla de transformación de texto.
+                self._f_dyn.setRowVisible(self._combo_text_rule, True)
+                self._combo_text_rule.blockSignals(True)
+                rule_id = props.get("text_rule", "") or ""
+                ridx = self._combo_text_rule.findData(rule_id)
+                self._combo_text_rule.setCurrentIndex(ridx if ridx >= 0 else 0)
+                self._combo_text_rule.blockSignals(False)
                 
             if elem_type == "composite":
                 self._f_dyn.setRowVisible(self._edit_composite, True)
                 self._edit_composite.setText(props.get("composite_template", ""))
 
+        elif elem_type in ("image", "photo_path"):
+            self._w_dynamic_group.setVisible(True)
+            # La imagen no usa formato de texto ni fuente/tamaño/color.
+            self._f_dyn.setRowVisible(self._combo_render_as, False)
+            for _w in (self._combo_font, self._spin_font_size, self._chk_bold,
+                       self._btn_color):
+                self._form.setRowVisible(_w, False)
+
+            campo = element.get("campo_dato") or ""
+            src = props.get("src", "")
+            source = props.get("img_source") or ("file" if (src and not campo) else "attribute")
+
+            self._combo_img_source.blockSignals(True)
+            self._combo_img_source.setCurrentText(
+                "Archivo" if source == "file" else "Atributo"
+            )
+            self._combo_img_source.blockSignals(False)
+
+            self._combo_img_attr.blockSignals(True)
+            idx = self._combo_img_attr.findData(campo) if campo else 0
+            self._combo_img_attr.setCurrentIndex(idx if idx >= 0 else 0)
+            self._combo_img_attr.blockSignals(False)
+
+            from pathlib import Path as _PathImg
+            self._btn_img_file.setText(
+                _PathImg(src).name if src else "Elegir archivo…"
+            )
+
+            self._f_dyn.setRowVisible(self._combo_img_source, True)
+            is_file = source == "file"
+            self._f_dyn.setRowVisible(self._combo_img_attr, not is_file)
+            self._f_dyn.setRowVisible(self._btn_img_file, is_file)
+
+            # Etiqueta del elemento imagen (opcional).
+            self._edit_img_label.blockSignals(True)
+            self._edit_img_label.setText(props.get("label", "") or "")
+            self._edit_img_label.blockSignals(False)
+            self._f_dyn.setRowVisible(self._edit_img_label, True)
+
         for widget in (self._spin_x, self._spin_y, self._spin_w, self._spin_h, 
-                       self._combo_font, self._spin_font_size, self._combo_render_as,
+                       self._combo_font, self._spin_font_size, self._chk_bold,
+                       self._combo_render_as,
                        self._combo_barcode_format, self._edit_test_text, self._edit_composite,
                        self._combo_align):
             widget.blockSignals(False)
@@ -650,6 +768,24 @@ class PropertiesPanel(QWidget):
 
     def set_available_attributes(self, attributes: list[str]) -> None:
         pass
+
+    def set_image_attributes(self, attributes: list[str]) -> None:
+        """Puebla el combobox de atributos de imagen (origen 'Atributo')."""
+        self._img_attributes = list(attributes or [])
+        self._combo_img_attr.blockSignals(True)
+        self._combo_img_attr.clear()
+        self._combo_img_attr.addItem("Selecciona un atributo…", "")
+        for attr in self._img_attributes:
+            self._combo_img_attr.addItem(attr, attr)
+        self._combo_img_attr.blockSignals(False)
+
+    def _on_img_source_changed(self, text: str) -> None:
+        """Cambia el origen del elemento imagen (Atributo / Archivo)."""
+        is_file = text == "Archivo"
+        self.property_changed.emit("img_source", "file" if is_file else "attribute")
+        # Mostrar el control correspondiente.
+        self._f_dyn.setRowVisible(self._combo_img_attr, not is_file)
+        self._f_dyn.setRowVisible(self._btn_img_file, is_file)
 
     def _pick_color(self) -> None:
         """Abre el selector de color nativo."""
@@ -865,8 +1001,8 @@ class TemplateEditor(QWidget):
         right_panel = self._build_right_panel()
         splitter.addWidget(right_panel)
 
-        # Proporciones del splitter (200 : stretch : 240)
-        splitter.setSizes([200, 600, 240])
+        # Proporciones del splitter (200 : stretch : 340)
+        splitter.setSizes([200, 560, 340])
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setStretchFactor(2, 0)
@@ -1031,7 +1167,7 @@ class TemplateEditor(QWidget):
             Widget con PropertiesPanel y LayersPanel apilados.
         """
         panel = QWidget()
-        panel.setFixedWidth(280)
+        panel.setFixedWidth(340)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 8, 8, 8)
         layout.setSpacing(8)
@@ -1118,6 +1254,9 @@ class TemplateEditor(QWidget):
         self._canvas_toolbar.item_dragged.connect(self._on_tool_dragged)
         self._layers_panel.layer_selected.connect(self._on_layer_selected)
         self._properties_panel.property_changed.connect(self._on_property_changed)
+        self._properties_panel.image_file_requested.connect(
+            self._on_image_file_requested
+        )
 
     # ── Métodos públicos ───────────────────────────────────────────
 
@@ -1163,51 +1302,98 @@ class TemplateEditor(QWidget):
         self._update_config_buttons_state()
 
     def _update_config_buttons_state(self) -> None:
-        """Habilita/deshabilita los botones de configuración de multiplantillaje
-        y ajusta su tooltip según si la plantilla está guardada (Req 1.4/1.5).
+        """Actualiza el ⚙ y el estado de FRENTE/VUELTA por lado.
 
-        La plantilla se considera guardada cuando ``self._plantilla`` existe y
-        tiene un ``cliente_id`` identificable.
+        Por cada lado: si existe una ConfiguracionLado para (plantilla, lado), el
+        ⚙ de ese lado se habilita (para editar/eliminar) y el encabezado queda
+        inhabilitado para asignación directa; si no existe, el ⚙ se deshabilita y
+        el encabezado queda disponible. El ⚙ requiere además plantilla guardada
+        (Req 2.3/2.4).
         """
-        enabled = bool(
+        saved = bool(
             getattr(self, "_plantilla", None) is not None
             and getattr(self._plantilla, "cliente_id", None)
         )
-        if enabled:
-            tooltip = "Configurar multiplantillaje"
-        else:
-            tooltip = "Guarda la plantilla antes de configurar el multiplantillaje"
+        self._lado_tiene_config = {"frente": False, "vuelta": False}
+        if saved:
+            try:
+                from credencializacion.db.engine import DatabaseSession
+                from credencializacion.db.repositories import LadoConfigRepository
 
-        for attr in ("_btn_config_frente", "_btn_config_vuelta"):
+                with DatabaseSession() as session:
+                    for side in ("frente", "vuelta"):
+                        cfg = LadoConfigRepository.get_config_lado(
+                            session, self._plantilla.id, side
+                        )
+                        self._lado_tiene_config[side] = cfg is not None
+            except Exception:  # noqa: BLE001
+                pass
+
+        for side, attr in (
+            ("frente", "_btn_config_frente"),
+            ("vuelta", "_btn_config_vuelta"),
+        ):
             btn = getattr(self, attr, None)
-            if btn is not None:
-                btn.setEnabled(enabled)
-                btn.setToolTip(tooltip)
+            if btn is None:
+                continue
+            has_config = self._lado_tiene_config.get(side, False)
+            btn.setEnabled(saved and has_config)
+            if not saved:
+                btn.setToolTip(
+                    "Guarda la plantilla antes de configurar el multiplantillaje"
+                )
+            elif has_config:
+                btn.setToolTip(f"Editar multiplantillaje del {side}")
+            else:
+                btn.setToolTip(
+                    f"Selecciona 2+ imágenes en {side.upper()} para crear el "
+                    "multiplantillaje"
+                )
 
-    def _open_multi_template_dialog(self, side: str) -> None:
-        """Abre el diálogo de configuración de multiplantillaje para el cliente
-        de la plantilla en edición (Req 1.3).
+    def _open_lado_config(self, side: str, rutas_iniciales: list[str] | None = None) -> None:
+        """Abre la Vista_Configuracion del lado (crea o edita la config).
 
-        Si el diálogo no puede abrirse, muestra un mensaje de error y mantiene
-        el editor sin cambios (Req 1.6).
-
-        Args:
-            side: Lado desde el que se activó el botón ('frente' o 'vuelta').
+        Requiere plantilla guardada (para conocer plantilla_id y cliente_id). Si
+        no lo está, ofrece guardar primero. Al guardar/eliminar la configuración,
+        recarga la imagen base por defecto del lado y refresca los botones.
         """
         from PySide6.QtWidgets import QMessageBox
 
-        # Guarda de seguridad: solo se opera con plantilla guardada (Req 1.5).
         if getattr(self, "_plantilla", None) is None or not getattr(
             self._plantilla, "cliente_id", None
         ):
-            return
+            reply = QMessageBox.question(
+                self,
+                "Guardar diseño",
+                "Para configurar el multiplantillaje hay que guardar primero el "
+                "diseño. ¿Guardar ahora?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self.save_template()
+            if getattr(self, "_plantilla", None) is None or not getattr(
+                self._plantilla, "cliente_id", None
+            ):
+                return
 
         try:
             from credencializacion.ui.dialogs.multi_template_dialog import (
                 MultiTemplateDialog,
             )
 
-            dialog = MultiTemplateDialog(self._plantilla.cliente_id, self)
+            dialog = MultiTemplateDialog(
+                self._plantilla.id,
+                self._plantilla.cliente_id,
+                side,
+                rutas_iniciales,
+                self,
+            )
+            dialog.config_saved.connect(
+                lambda _pid, lado: self._on_lado_config_changed(lado)
+            )
+            dialog.config_deleted.connect(
+                lambda _pid, lado: self._on_lado_config_changed(lado)
+            )
             dialog.exec()
         except Exception as e:  # noqa: BLE001 — mantener el editor sin cambios (Req 1.6)
             QMessageBox.critical(
@@ -1215,6 +1401,36 @@ class TemplateEditor(QWidget):
                 "Multiplantillaje",
                 f"No se pudo abrir la configuración de multiplantillaje.\n\n{e}",
             )
+
+    def _on_lado_config_changed(self, side: str) -> None:
+        """Tras guardar/eliminar la config de un lado, recarga el fondo y botones."""
+        self._reload_base_image_from_db(side)
+        self._update_config_buttons_state()
+
+    def _reload_base_image_from_db(self, side: str) -> None:
+        """Recarga la imagen base por defecto del lado desde la BD y la aplica."""
+        from pathlib import Path
+        from credencializacion.db.engine import get_session
+        from credencializacion.db.models import Plantilla
+
+        if not self._plantilla:
+            return
+        with get_session() as session:
+            p = session.query(Plantilla).get(self._plantilla.id)
+            if not p:
+                return
+            recursos = dict(p.recursos or {})
+        self._plantilla.recursos = recursos
+        path = recursos.get(f"fondo_{side}")
+        if path and Path(path).exists():
+            self._apply_base_image_to_scene(side, Path(path))
+            self._update_header_label(side, Path(path).name)
+
+    def _open_multi_template_dialog(self, side: str) -> None:
+        """Abre la configuración de multiplantillaje del lado desde el ⚙ (Req 1.3)."""
+        self._open_lado_config(side)
+
+    def _load_client_attributes(self, cliente_id: int) -> None:
         """Carga los atributos conocidos del cliente en el toolbar.
 
         Si el cliente ya fue sincronizado, usa sus `known_attributes`.
@@ -1230,8 +1446,12 @@ class TemplateEditor(QWidget):
 
             cfg = cliente.config or {}
             known_attrs = cfg.get("known_attributes", [])
+            image_attrs = cfg.get("image_attributes", [])
             last_sync = cfg.get("last_sync", "")
             nombre_cliente = cliente.nombre
+
+        # Poblar el combobox de atributos de imagen del panel de propiedades.
+        self._properties_panel.set_image_attributes(image_attrs)
 
         if known_attrs:
             # Atributos reales del cliente — actualizar el toolbar
@@ -1248,24 +1468,29 @@ class TemplateEditor(QWidget):
     # ── Plantilla base (imagen de fondo) ───────────────────────────────────
 
     def _select_base_image(self, side: str) -> None:
-        """Abre un explorador de archivos para seleccionar la imagen base del lado.
+        """Selecciona la(s) imagen(es) base del lado desde el explorador.
 
-        Permite seleccionar **varias** imágenes a la vez (Cmd/Shift-clic en
-        macOS). Con una sola imagen se asigna como fondo del lado actual; con
-        varias, cada imagen se convierte en un nuevo diseño del cliente y se abre
-        el flujo de configuración de multiplantillaje para asignar atributos y
-        valores.
-
-        Args:
-            side: 'frente' o 'vuelta'.
+        - Si el lado ya tiene configuración de multiplantillaje, la asignación
+          directa está inhabilitada: se indica usar el ⚙ para editarla.
+        - 1 imagen → se asigna como fondo del lado (sin multiplantillaje).
+        - 2+ imágenes → se abre la Vista_Configuracion del lado para definir las
+          variantes (no se crean diseños nuevos).
         """
         from PySide6.QtWidgets import QFileDialog
         from pathlib import Path
 
+        if getattr(self, "_lado_tiene_config", {}).get(side):
+            self.set_status(
+                f"El lado {side} usa multiplantillaje. Edítalo con el botón ⚙ "
+                f"junto a {side.upper()}.",
+                "info",
+            )
+            return
+
         paths, _ = QFileDialog.getOpenFileNames(
             self,
             f"Seleccionar imagen base — {side.upper()} "
-            "(elige varias para crear varios diseños)",
+            "(elige varias para multiplantillaje)",
             str(Path.home()),
             "Imágenes (*.png *.jpg *.jpeg *.webp)",
         )
@@ -1276,9 +1501,16 @@ class TemplateEditor(QWidget):
             self._apply_single_base_image(side, paths[0])
             return
 
-        # Selección múltiple: crear un diseño por imagen e iniciar el flujo de
-        # multiplantillaje.
-        self._create_designs_from_images(side, paths)
+        # 2+ imágenes → multiplantillaje del lado: copiar imágenes y abrir la
+        # Vista_Configuracion (no se crean diseños/plantillas nuevas).
+        rutas: list[str] = []
+        for p in paths:
+            dest = self._copy_to_plantilla_base(p)
+            if dest is not None:
+                rutas.append(str(dest))
+        if not rutas:
+            return
+        self._open_lado_config(side, rutas)
 
     def _copy_to_plantilla_base(self, path_str: str) -> "Path | None":
         """Copia una imagen a la carpeta de imágenes base y devuelve su ruta destino.
@@ -1318,103 +1550,6 @@ class TemplateEditor(QWidget):
         self._apply_base_image_to_scene(side, dest)
         # Actualizar etiqueta del header
         self._update_header_label(side, Path(path_str).name)
-
-    def _create_designs_from_images(self, side: str, paths: list[str]) -> None:
-        """Crea un diseño (Plantilla) por cada imagen y abre el multiplantillaje.
-
-        Cada imagen seleccionada se copia a ``plantilla_base/`` y origina un
-        nuevo diseño del mismo cliente, clonando tipo/orientación/dimensiones del
-        diseño actual y usando la imagen como fondo del lado indicado. Al
-        terminar se abre el ``MultiTemplateDialog`` para asignar atributos y
-        valores a los diseños del cliente.
-
-        Requiere que el diseño actual esté guardado para conocer el cliente; si
-        no lo está, ofrece guardarlo primero.
-        """
-        from PySide6.QtWidgets import QMessageBox
-        from pathlib import Path
-
-        # Se necesita el cliente del diseño actual (Req 1.5). Si no está guardado,
-        # se ofrece guardar para poder asociar los nuevos diseños.
-        if getattr(self, "_plantilla", None) is None or not getattr(
-            self._plantilla, "cliente_id", None
-        ):
-            reply = QMessageBox.question(
-                self,
-                "Guardar diseño",
-                "Para crear varios diseños hay que guardar primero el diseño "
-                "actual y asociarlo a un cliente. ¿Guardar ahora?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            )
-            if reply == QMessageBox.StandardButton.Yes:
-                self.save_template()
-            if getattr(self, "_plantilla", None) is None or not getattr(
-                self._plantilla, "cliente_id", None
-            ):
-                return
-
-        cliente_id = self._plantilla.cliente_id
-        tipo = self._plantilla.tipo
-        orientacion = self._plantilla.orientacion
-        ancho = self._plantilla.ancho
-        alto = self._plantilla.alto
-
-        from credencializacion.db.engine import get_session
-        from credencializacion.db.models import Plantilla
-
-        creados = 0
-        errores = 0
-        with get_session() as session:
-            # Nombres ya usados por el cliente para evitar duplicados visibles.
-            usados = {
-                n for (n,) in session.query(Plantilla.nombre)
-                .filter(Plantilla.cliente_id == cliente_id)
-                .all()
-            }
-            for path_str in paths:
-                dest = self._copy_to_plantilla_base(path_str)
-                if dest is None:
-                    errores += 1
-                    continue
-
-                base_nombre = Path(path_str).stem or "Diseño"
-                nombre = base_nombre
-                sufijo = 2
-                while nombre in usados:
-                    nombre = f"{base_nombre} ({sufijo})"
-                    sufijo += 1
-                usados.add(nombre)
-
-                session.add(
-                    Plantilla(
-                        cliente_id=cliente_id,
-                        nombre=nombre,
-                        tipo=tipo,
-                        orientacion=orientacion,
-                        ancho=ancho,
-                        alto=alto,
-                        elementos_frente=[],
-                        elementos_vuelta=[],
-                        recursos={f"fondo_{side}": str(dest)},
-                    )
-                )
-                creados += 1
-            session.commit()
-
-        if creados == 0:
-            self.set_status(
-                "❌ No se pudo crear ningún diseño a partir de las imágenes.",
-                "error",
-            )
-            return
-
-        msg = f"✅ {creados} diseño(s) creado(s) a partir de las imágenes."
-        if errores:
-            msg += f" {errores} no se pudieron copiar."
-        self.set_status(msg, "success")
-
-        # Abrir el flujo de asignación de multiplantillaje para el cliente.
-        self._open_multi_template_dialog(side)
 
     def _save_base_image_path(self, side: str, path: str) -> None:
         """Persiste la ruta de la imagen base en Plantilla.recursos."""
@@ -1842,37 +1977,17 @@ class TemplateEditor(QWidget):
     # ── Handlers internos ──────────────────────────────────────────
 
     def _switch_side(self, side: str) -> None:
-        """Cambia entre frente y vuelta.
+        """Cambia el lado activo (frente/vuelta) para edición de capas.
+
+        El editor muestra ambos lienzos apilados, por lo que solo se actualiza
+        el lado activo y el panel de capas; no hay botones toggle que estilizar.
 
         Args:
             side: 'frente' o 'vuelta'.
         """
         self._current_side = side
 
-        active_style = f"""
-            QPushButton {{
-                background-color: {PRIMARY}; color: #FFFFFF;
-                border: none; border-radius: 6px;
-                padding: 8px 16px; font-size: 13px; font-weight: 600;
-            }}
-        """
-        inactive_style = f"""
-            QPushButton {{
-                background-color: {MAIN_BG}; color: {TEXT_LIGHT};
-                border: 1px solid {BORDER}; border-radius: 6px;
-                padding: 8px 16px; font-size: 13px; font-weight: 600;
-            }}
-            QPushButton:hover {{ color: {TEXT_DARK}; border-color: {TEXT_LIGHT}; }}
-        """
-
-        if side == "frente":
-            self._btn_front.setStyleSheet(active_style)
-            self._btn_back.setStyleSheet(inactive_style)
-        else:
-            self._btn_front.setStyleSheet(inactive_style)
-            self._btn_back.setStyleSheet(active_style)
-
-        # Recargar capas
+        # Recargar capas del lado activo
         elementos = self._get_elementos(side)
         self._layers_panel.set_layers(elementos)
 
@@ -2094,6 +2209,157 @@ class TemplateEditor(QWidget):
         elementos = self._get_elementos(self._current_side)
         if data in elementos:
             elementos.remove(data)
+
+        # Si era una imagen con origen archivo, borrar el archivo copiado solo si
+        # no se usa en otra parte (otro lado, otra plantilla del cliente, o una
+        # configuración de multiplantillaje) — Decisión del usuario.
+        self._maybe_cleanup_image_file(data)
+
         self._layers_panel.set_layers(elementos)
         
         self._properties_panel.update_properties(None)
+
+    def _on_image_file_requested(self) -> None:
+        """Abre el explorador para asignar un archivo de imagen al elemento."""
+        from PySide6.QtWidgets import QFileDialog
+        from pathlib import Path
+
+        scene = self._scene_frente if self._current_side == "frente" else self._scene_vuelta
+        selected = scene.selectedItems()
+        if not selected:
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Elegir imagen", str(Path.home()),
+            "Imágenes (*.png *.jpg *.jpeg *.webp)",
+        )
+        if not path:
+            return
+        dest = self._copy_to_img_dir(path)
+        if dest is None:
+            return
+        item = selected[0]
+        data = item.get_data()
+        props = data.setdefault("properties", {})
+        props["src"] = str(dest)
+        props["img_source"] = "file"
+        data["campo_dato"] = None  # origen archivo: no usa atributo
+        self._push_undo_state()
+        item.set_data(data)
+        self._properties_panel.update_properties(item.get_data())
+
+    def _copy_to_img_dir(self, path_str: str) -> "Path | None":
+        """Copia (o reutiliza) una imagen en data/img/{cliente} y devuelve su ruta.
+
+        Si ya existe un archivo con el mismo nombre y tamaño, se reutiliza en
+        lugar de volver a copiar (evita duplicados).
+        """
+        from pathlib import Path
+        import shutil
+        from credencializacion.utils.paths import get_img_dir
+
+        cliente_nombre = None
+        if self._plantilla and getattr(self._plantilla, "cliente_id", None):
+            from credencializacion.db.engine import get_session
+            from credencializacion.db.models import Cliente
+
+            with get_session() as s:
+                c = s.query(Cliente).get(self._plantilla.cliente_id)
+                cliente_nombre = c.nombre if c else None
+
+        src = Path(path_str)
+        dest_folder = get_img_dir(cliente_nombre)
+        dest = dest_folder / src.name
+
+        if src.resolve() == dest.resolve():
+            return dest
+        # Reutilizar si ya está copiada (mismo nombre y tamaño).
+        try:
+            if dest.exists() and dest.stat().st_size == src.stat().st_size:
+                return dest
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            shutil.copy2(src, dest)
+        except Exception as e:  # noqa: BLE001
+            self.set_status(f"❌ No se pudo copiar la imagen: {e}", "error")
+            return None
+        return dest
+
+    def _maybe_cleanup_image_file(self, data: dict) -> None:
+        """Borra el archivo de imagen del elemento si ya no se usa en ninguna parte."""
+        from pathlib import Path
+        from credencializacion.utils.paths import get_img_dir
+
+        if (data or {}).get("type") not in ("image", "photo_path"):
+            return
+        src = (data.get("properties") or {}).get("src", "")
+        if not src:
+            return
+        try:
+            src_path = Path(src)
+            img_root = get_img_dir()  # data/img (raíz)
+            # Solo gestionamos archivos dentro de nuestra carpeta de imágenes.
+            if img_root not in src_path.resolve().parents:
+                return
+            if not src_path.exists():
+                return
+            if self._image_src_used_elsewhere(src):
+                return
+            src_path.unlink()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _image_src_used_elsewhere(self, src: str) -> bool:
+        """Indica si una ruta de imagen se usa en otro elemento/plantilla/config."""
+        # 1) Otro lado del diseño en edición (escenas actuales).
+        from credencializacion.ui.widgets.canvas import GraphicElement
+
+        for scene in (self._scene_frente, self._scene_vuelta):
+            for it in scene.items():
+                if isinstance(it, GraphicElement):
+                    if (it.data_dict().get("properties") or {}).get("src") == src:
+                        return True
+
+        if not (self._plantilla and getattr(self._plantilla, "cliente_id", None)):
+            return False
+
+        # 2) Plantillas del cliente (elementos) y configuraciones por lado.
+        try:
+            from credencializacion.db.engine import get_session
+            from credencializacion.db.models import (
+                Plantilla, VarianteImagen, ConfiguracionLado,
+            )
+
+            with get_session() as s:
+                plantillas = (
+                    s.query(Plantilla)
+                    .filter_by(cliente_id=self._plantilla.cliente_id)
+                    .all()
+                )
+                for p in plantillas:
+                    for elementos in (p.elementos_frente or [], p.elementos_vuelta or []):
+                        for el in elementos:
+                            if (el.get("properties") or {}).get("src") == src:
+                                return True
+                    if src in (dict(p.recursos or {})).values():
+                        return True
+                # Variantes de multiplantillaje (rutas de imagen) del cliente.
+                q = (
+                    s.query(VarianteImagen.imagen_path)
+                    .join(ConfiguracionLado)
+                    .join(Plantilla, Plantilla.id == ConfiguracionLado.plantilla_id)
+                    .filter(Plantilla.cliente_id == self._plantilla.cliente_id)
+                )
+                if any(row[0] == src for row in q.all()):
+                    return True
+                if (
+                    s.query(ConfiguracionLado)
+                    .join(Plantilla, Plantilla.id == ConfiguracionLado.plantilla_id)
+                    .filter(Plantilla.cliente_id == self._plantilla.cliente_id)
+                    .filter(ConfiguracionLado.imagen_default_path == src)
+                    .count()
+                ):
+                    return True
+        except Exception:  # noqa: BLE001
+            return True  # ante la duda, no borrar
+        return False

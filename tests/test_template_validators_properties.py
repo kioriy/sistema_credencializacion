@@ -15,7 +15,7 @@ from __future__ import annotations
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from credencializacion.services.template_assignment import normalize
+from credencializacion.services.image_selection import normalize
 from credencializacion.services.template_validators import (
     ATRIBUTO_MAX_LEN,
     ATRIBUTO_MIN_LEN,

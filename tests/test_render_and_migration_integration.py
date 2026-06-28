@@ -234,9 +234,9 @@ _OLD_TABLES = [
     ItemCola.__table__,
 ]
 _NEW_TABLES = {
-    "configuraciones_multiplantillaje",
-    "reglas_asignacion",
-    "condiciones_asignacion",
+    "configuraciones_lado",
+    "variantes_imagen",
+    "condiciones_variante",
 }
 
 

@@ -605,12 +605,106 @@ class ControlPanel(QWidget):
     # ── Handlers de acciones ───────────────────────────────────────
 
     def _on_preview(self) -> None:
-        """Emite señal de vista previa con IDs en la cola de impresión."""
+        """Genera la vista previa de la cola de impresión en memoria.
+
+        Renderiza dos documentos (frentes y vueltas) con 2 diseños por hoja,
+        usando el diseño seleccionado y los overrides de multiplantillaje por
+        lado, y los muestra en el diálogo de vista previa.
+        """
         queue_records = self._queue_panel.get_queue()
         if not queue_records:
             self.set_status("⚠️ La cola de impresión está vacía", "warning")
             return
-        self.preview_requested.emit([r.id for r in queue_records])
+
+        plantilla_id = self._combo_templates.currentData()
+        if not plantilla_id:
+            self.set_status("⚠️ Selecciona una plantilla primero", "warning")
+            return
+
+        from credencializacion.db.engine import DatabaseSession
+        from credencializacion.db.models import Plantilla, Registro
+        from credencializacion.renderer.pdf_engine import PDFEngine
+        from credencializacion.ui.dialogs.preview_dialog import PreviewDialog
+        from pathlib import Path
+        import tempfile
+
+        self.set_status("🖼 Generando vista previa...", "info", toast=False)
+
+        try:
+            ids = [r.id for r in queue_records]
+            with DatabaseSession() as session:
+                plantilla = session.query(Plantilla).get(plantilla_id)
+                if plantilla is None:
+                    self.set_status("⚠️ Plantilla no encontrada", "warning")
+                    return
+
+                # Re-cargar registros dentro de la sesión, preservando el orden
+                # de la cola.
+                regs_by_id = {
+                    r.id: r
+                    for r in session.query(Registro).filter(Registro.id.in_(ids)).all()
+                }
+                render_items = [
+                    (regs_by_id[i], plantilla) for i in ids if i in regs_by_id
+                ]
+                if not render_items:
+                    self.set_status("⚠️ No hay registros para previsualizar", "warning")
+                    return
+
+                overrides_frente = self._compute_fondo_overrides(
+                    session, render_items, "frente"
+                )
+                overrides_vuelta = self._compute_fondo_overrides(
+                    session, render_items, "vuelta"
+                )
+
+                engine = PDFEngine(plantilla)
+                tmp_dir = Path(tempfile.mkdtemp(prefix="credencial_preview_"))
+                frentes_pdf = engine.render_queue(
+                    render_items, "frente", tmp_dir / "frentes.pdf",
+                    fondo_overrides=overrides_frente,
+                )
+                vueltas_pdf = engine.render_queue(
+                    render_items, "vuelta", tmp_dir / "vueltas.pdf",
+                    fondo_overrides=overrides_vuelta,
+                )
+
+            dlg = PreviewDialog(
+                frentes_pdf=frentes_pdf,
+                vueltas_pdf=vueltas_pdf,
+                parent=self,
+            )
+            self.set_status("✅ Vista previa generada", "success", toast=False)
+            dlg.exec()
+
+        except Exception as e:
+            self.set_status(f"❌ Error en vista previa: {e}", "error")
+
+    def _compute_fondo_overrides(
+        self, session, render_items, cara: str
+    ) -> list[str | None]:
+        """Calcula la imagen de fondo por ítem para un lado (multiplantillaje).
+
+        Para cada (registro, plantilla), si el diseño tiene `ConfiguracionLado`
+        para ese lado, evalúa las variantes contra los datos del registro y
+        devuelve la ruta elegida; si no hay configuración, devuelve ``None`` (se
+        usa la imagen base del diseño). La config de cada diseño se cachea por id.
+        """
+        from credencializacion.db.repositories import LadoConfigRepository
+        from credencializacion.services.image_selection import select_imagen
+
+        cache: dict[int, object] = {}
+        overrides: list[str | None] = []
+        for registro, plantilla in render_items:
+            pid = plantilla.id
+            if pid not in cache:
+                cache[pid] = LadoConfigRepository.get_config_lado(session, pid, cara)
+            config = cache[pid]
+            if config is None:
+                overrides.append(None)
+            else:
+                overrides.append(select_imagen(registro.datos or {}, config))
+        return overrides
 
     def _on_print_front(self) -> None:
         """Emite señal de impresión frontal guardando la cola."""
@@ -673,7 +767,6 @@ class ControlPanel(QWidget):
         # Crear en BD
         from credencializacion.db.engine import DatabaseSession
         from credencializacion.db.models import ColaImpresion, ItemCola
-        from credencializacion.db.repositories import MultiTemplateRepository
 
         try:
             with DatabaseSession() as session:
@@ -686,39 +779,16 @@ class ControlPanel(QWidget):
                 session.add(cola)
                 session.flush()
 
-                # Resolver la configuración de multiplantillaje del cliente. Los
-                # registros de la cola pertenecen a un mismo cliente; se toma el
-                # `cliente_id` del primer registro disponible (Req 5.5, 5.7).
-                cliente_id = next(
-                    (r.cliente_id for r in queue_records if r.cliente_id is not None),
-                    None,
-                )
-                config_dto = (
-                    MultiTemplateRepository.get_config(session, cliente_id)
-                    if cliente_id is not None
-                    else None
-                )
-
+                # Todos los ítems usan el diseño seleccionado. El multiplantillaje
+                # ya NO cambia de diseño por registro: solo intercambia la imagen
+                # de fondo por lado, lo cual se resuelve en el momento del render
+                # (print_center) consultando la ConfiguracionLado del diseño.
                 items_creados = 0
                 for orden, reg in enumerate(queue_records, start=1):
-                    if config_dto is None:
-                        # Sin configuración: comportamiento actual, la plantilla
-                        # seleccionada se usa para todos los registros (Req 5.7).
-                        item_plantilla_id = plantilla_id
-                    else:
-                        # Con configuración: resolver la plantilla por registro
-                        # (Req 5.5). Un resultado None indica que el registro debe
-                        # omitirse (Req 5.8/8.4).
-                        item_plantilla_id = self._resolve_plantilla_id(
-                            reg, config_dto, plantilla_id
-                        )
-                        if item_plantilla_id is None:
-                            continue
-
                     item = ItemCola(
                         cola_id=cola.id,
                         registro_id=reg.id,
-                        plantilla_id=item_plantilla_id,
+                        plantilla_id=plantilla_id,
                         orden=orden,
                     )
                     session.add(item)
@@ -739,31 +809,6 @@ class ControlPanel(QWidget):
 
         except Exception as e:
             self.set_status(f"❌ Error al guardar cola: {e}", "error")
-
-    def _resolve_plantilla_id(self, registro, config_dto, plantilla_cola_id):
-        """Resuelve el `plantilla_id` de un registro vía el Motor_Asignacion.
-
-        Wrapper de UI sobre `resolve_template`: traduce el `AssignmentResult` a
-        un `plantilla_id` (o ``None``) y emite el log correspondiente
-        identificando el registro afectado.
-
-        - status ``"error"``: registra un error y devuelve ``None`` para que el
-          registro se omita (no se crea `ItemCola`, Req 5.8/8.4).
-        - status ``"fallback_cola"`` / ``"warning_missing"``: registra una
-          advertencia y devuelve la plantilla resuelta (Req 8.3, 8.6).
-        - resto de estados: devuelve la plantilla resuelta sin log (Req 5.5).
-        """
-        from credencializacion.services.template_assignment import resolve_template
-
-        result = resolve_template(
-            registro.datos or {}, config_dto, plantilla_cola_id
-        )
-        if result.status == "error":
-            logger.error(result.message)
-            return None
-        if result.status in ("fallback_cola", "warning_missing"):
-            logger.warning(result.message)
-        return result.plantilla_id
 
     def _on_search_changed(self, text: str) -> None:
         """Filtra registros por texto de búsqueda en cualquier campo."""
@@ -1044,8 +1089,23 @@ class ControlPanel(QWidget):
                 if not raw_records:
                     continue
 
-                # Detectar atributos disponibles de la primera fila
-                known_attrs = list(raw_records[0].keys()) if raw_records else []
+                # Atributos conocidos = unión de claves ESCALARES en todos los
+                # registros (student_record es dinámico por escuela, así que no
+                # basta con la primera fila). Se excluyen listas/dicts.
+                from credencializacion.utils.images import detect_image_attributes
+
+                known_attrs: list[str] = []
+                _seen_attr: set[str] = set()
+                for _rec in raw_records:
+                    if not isinstance(_rec, dict):
+                        continue
+                    for _k, _v in _rec.items():
+                        if _k in _seen_attr or isinstance(_v, (list, dict)):
+                            continue
+                        _seen_attr.add(_k)
+                        known_attrs.append(_k)
+                # Atributos de imagen (foto alumno, logo, fotos de autorizados…).
+                image_attrs = detect_image_attributes(raw_records)
 
                 with DatabaseSession() as session:
                     # Upsert de registros: clave = (cliente_id, enrollment_code)
@@ -1078,6 +1138,7 @@ class ControlPanel(QWidget):
                     if cliente_obj:
                         cfg = dict(cliente_obj.config or {})
                         cfg["known_attributes"] = known_attrs
+                        cfg["image_attributes"] = image_attrs
                         cfg["last_sync"] = datetime.now().isoformat()
                         cliente_obj.config = cfg
 

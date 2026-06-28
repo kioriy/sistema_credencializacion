@@ -27,6 +27,7 @@ from credencializacion.renderer.coordinates import (
     calculate_card_positions_from_config,
     final_coordinate,
 )
+from credencializacion.services.text_rules import apply_text_rule
 from credencializacion.renderer.text_fit import (
     fit_font_size,
     compute_anchor_x,
@@ -166,6 +167,7 @@ class PDFEngine:
         items: list[tuple["Registro", "Plantilla"]],
         cara: str,
         output_path: Path,
+        fondo_overrides: list[str | None] | None = None,
     ) -> Path:
         """Genera PDF de una cola de impresión (solo frentes o solo vueltas).
 
@@ -178,6 +180,10 @@ class PDFEngine:
             items: Lista de tuplas (registro, plantilla) en orden.
             cara: 'frente' o 'vuelta'.
             output_path: Ruta donde se guardará el PDF.
+            fondo_overrides: Lista opcional alineada a ``items``. Para el ítem
+                ``i``, si ``fondo_overrides[i]`` no es ``None``, se usa esa ruta
+                como imagen de fondo (multiplantillaje por lado); si es ``None``,
+                se usa la imagen base del diseño (`Plantilla.recursos[fondo_lado]`).
 
         Returns:
             La ruta al PDF generado.
@@ -185,32 +191,32 @@ class PDFEngine:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         c = Canvas(str(output_path), pagesize=self._page_size)
 
-        # Req 5.9: omitir los ítems cuya plantilla asignada no puede cargarse
-        # (imagen base de la cara no disponible), registrando un error que
-        # identifica el registro y la plantilla afectados y continuando con el
-        # resto de la cola. Se filtra antes de paginar para no descuadrar los
-        # slots de cada página.
-        renderable_items: list[tuple["Registro", "Plantilla"]] = []
-        for registro, plantilla in items:
-            if not self._can_load_template_resources(plantilla, cara):
+        overrides = fondo_overrides or [None] * len(items)
+        if len(overrides) < len(items):
+            overrides = list(overrides) + [None] * (len(items) - len(overrides))
+
+        # Req 5.9 / 9.3: omitir los ítems cuyo fondo (override de multiplantillaje
+        # o imagen base del diseño) no puede cargarse, registrando un error que
+        # identifica el registro y la imagen afectada y continuando con el resto.
+        renderable_items: list[tuple["Registro", "Plantilla", str | None]] = []
+        for (registro, plantilla), override in zip(items, overrides):
+            if not self._can_load_resources_or_override(plantilla, cara, override):
                 logger.error(
-                    "Omitiendo registro id=%s ('%s'): la plantilla id=%s ('%s') "
-                    "no pudo cargarse para la cara '%s' (imagen base no disponible)",
+                    "Omitiendo registro id=%s ('%s'): la imagen de fondo para la "
+                    "cara '%s' no pudo cargarse (override=%s, plantilla id=%s '%s')",
                     getattr(registro, "id", "?"),
                     getattr(registro, "enrollment_code", "") or "sin código",
+                    cara, override,
                     getattr(plantilla, "id", "?"),
                     getattr(plantilla, "nombre", "?"),
-                    cara,
                 )
                 continue
-            renderable_items.append((registro, plantilla))
+            renderable_items.append((registro, plantilla, override))
 
-        items = renderable_items
+        for page_idx in range(0, len(renderable_items), self._cards_per_page):
+            page_items = renderable_items[page_idx : page_idx + self._cards_per_page]
 
-        for page_idx in range(0, len(items), self._cards_per_page):
-            page_items = items[page_idx : page_idx + self._cards_per_page]
-
-            for slot_idx, (registro, plantilla) in enumerate(page_items):
+            for slot_idx, (registro, plantilla, override) in enumerate(page_items):
                 if slot_idx >= len(self._card_positions):
                     break
 
@@ -222,7 +228,9 @@ class PDFEngine:
                 )
                 recursos = plantilla.recursos or {}
                 base_key = "fondo_frente" if cara == "frente" else "fondo_vuelta"
-                self._current_base_img = recursos.get(base_key, "")
+                # Override de multiplantillaje por lado (Req 5.6): si hay ruta
+                # asignada para este registro, sustituye el fondo del diseño.
+                self._current_base_img = override or recursos.get(base_key, "")
                 self._current_cara = cara
 
                 base_pos = self._card_positions[slot_idx]
@@ -233,9 +241,22 @@ class PDFEngine:
         c.save()
         logger.info(
             "PDF cola generado (%s): %s (%d registros)",
-            cara, output_path, len(items),
+            cara, output_path, len(renderable_items),
         )
         return output_path
+
+    def _can_load_resources_or_override(
+        self, plantilla: "Plantilla", cara: str, override: str | None
+    ) -> bool:
+        """Valida el fondo a usar: la ruta override si existe, o los recursos.
+
+        Si hay un override de multiplantillaje, se considera cargable cuando esa
+        ruta existe en disco; si no hay override, se delega en la validación de
+        los recursos de la plantilla.
+        """
+        if override:
+            return Path(override).exists()
+        return self._can_load_template_resources(plantilla, cara)
 
 
     def _can_load_template_resources(
@@ -415,6 +436,7 @@ class PDFEngine:
     ) -> None:
         """Dibuja texto con sustitución de campo_dato."""
         text = self._get_element_text(registro, elem, props)
+        text = apply_text_rule(text, props.get("text_rule", ""))
 
         if not text:
             return
@@ -491,40 +513,28 @@ class PDFEngine:
         elem: dict,
         props: dict,
     ) -> None:
-        """Dibuja una imagen (foto del registro o recurso estático)."""
+        """Dibuja una imagen según el origen del elemento.
+
+        Prioridad por origen (Req: no usar la foto del estudiante como fallback
+        global):
+        - Si el elemento está vinculado a un atributo (``campo_dato``), se usa
+          SOLO el valor de ese atributo; si está vacío, el espacio queda en
+          blanco.
+        - Si tiene una ruta de archivo (``props.src``), se usa esa.
+        - Si no tiene ni atributo ni archivo, se usa la foto cacheada del
+          registro (compatibilidad para un elemento de imagen sin origen).
+        """
         campo = elem.get("campo_dato", "")
+        src = props.get("src", "")
         img_path: str | None = None
 
-        # 1. Foto cacheada localmente en la BD
-        if registro.photo_path and Path(str(registro.photo_path)).exists():
+        if campo:
+            val_str = str(registro.get_dato(campo, "") or "").strip()
+            img_path = self._resolve_image_path(val_str)
+        elif src:
+            img_path = self._resolve_image_path(str(src).strip())
+        elif registro.photo_path and Path(str(registro.photo_path)).exists():
             img_path = str(registro.photo_path)
-
-        # 2. Campo dinámico del registro (puede ser ruta local o URL HTTP)
-        if not img_path:
-            candidates = [campo] if campo else []
-            for key in candidates + ["photo_url", "photo_path", "foto", "url_foto"]:
-                val = registro.get_dato(key, "")
-                if not val:
-                    continue
-                val_str = str(val)
-                # Ruta local
-                if Path(val_str).exists():
-                    img_path = val_str
-                    break
-                # URL HTTP — descargar y cachear
-                if val_str.startswith(("http://", "https://")):
-                    cached = self._download_image(val_str)
-                    if cached:
-                        img_path = cached
-                        break
-
-        # 3. Src estático en props
-        if not img_path:
-            src = props.get("src", "")
-            if src and Path(str(src)).exists():
-                img_path = src
-            elif src and str(src).startswith(("http://", "https://")):
-                img_path = self._download_image(src)
 
         if img_path:
             try:
@@ -534,17 +544,21 @@ class PDFEngine:
                 )
             except Exception as e:
                 logger.warning("Error al dibujar imagen '%s': %s", img_path, e)
-                canvas.setFillColorRGB(0.9, 0.9, 0.9)
-                canvas.rect(x, y, w, h, fill=1, stroke=0)
-        else:
-            # Placeholder visual cuando no hay imagen disponible
-            canvas.setFillColorRGB(0.93, 0.95, 0.98)
-            canvas.setStrokeColorRGB(0.78, 0.83, 0.9)
-            canvas.setLineWidth(0.5)
-            canvas.rect(x, y, w, h, fill=1, stroke=1)
-            canvas.setFillColorRGB(0.6, 0.65, 0.75)
-            canvas.setFont("Helvetica", min(8, h * 0.25))
-            canvas.drawCentredString(x + w / 2, y + h / 2 - 2, "[ FOTO ]")
+        # Sin imagen disponible: se deja el espacio EN BLANCO (Req), sin
+        # placeholder ni foto por defecto.
+
+    def _resolve_image_path(self, val_str: str) -> str | None:
+        """Convierte un valor (ruta local o URL) en una ruta local utilizable.
+
+        Devuelve ``None`` si está vacío o no se puede resolver/descargar.
+        """
+        if not val_str:
+            return None
+        if Path(val_str).exists():
+            return val_str
+        if val_str.startswith(("http://", "https://")):
+            return self._download_image(val_str)
+        return None
 
     def _download_image(self, url: str) -> str | None:
         """Descarga una imagen desde URL y la guarda en caché temporal.

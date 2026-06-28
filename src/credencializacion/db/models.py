@@ -9,7 +9,7 @@ Arquitectura multi-tenant con columnas JSON dinámicas:
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, String, Text, func
+from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -349,24 +349,28 @@ class ItemCola(Base):
         )
 
 
-class ConfiguracionMultiplantillaje(Base):
-    """Configuración de multiplantillaje por Cliente (Decisión 1).
+class ConfiguracionLado(Base):
+    """Configuración de imágenes de fondo de un diseño para un lado concreto.
 
-    Agrupa las reglas de asignación y referencia la plantilla por defecto.
-    Relación 1:1 con Cliente: una configuración por cliente como máximo
-    (Req 4.1 — guardar reemplaza la previa).
+    Única por la combinación (plantilla, lado) gracias a UNIQUE(plantilla_id,
+    lado). Agrupa las variantes y referencia la Imagen_Base_Por_Defecto como una
+    RUTA de imagen (no una Plantilla). El multiplantillaje no crea diseños nuevos:
+    solo cambia la imagen de fondo del lado según las condiciones del registro.
     """
-    __tablename__ = "configuraciones_multiplantillaje"
+    __tablename__ = "configuraciones_lado"
+    __table_args__ = (
+        UniqueConstraint(
+            "plantilla_id", "lado", name="uq_config_lado_plantilla_lado"
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    cliente_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("clientes.id", ondelete="CASCADE"),
-        nullable=False, unique=True,  # 1 config por cliente
+    plantilla_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("plantillas.id", ondelete="CASCADE"), nullable=False,
     )
-    # Nullable para soportar Req 5.8 (sin default). El dominio exige default,
-    # pero la columna lo admite para no bloquear estados de error controlados.
-    plantilla_default_id: Mapped[int | None] = mapped_column(
-        Integer, ForeignKey("plantillas.id", ondelete="SET NULL"), nullable=True,
+    lado: Mapped[str] = mapped_column(String(10), nullable=False)  # "frente"|"vuelta"
+    imagen_default_path: Mapped[str | None] = mapped_column(
+        String(500), nullable=True
     )
 
     created_at: Mapped[datetime] = mapped_column(
@@ -376,92 +380,74 @@ class ConfiguracionMultiplantillaje(Base):
         DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
     )
 
-    # Relaciones
-    cliente: Mapped["Cliente"] = relationship()
-    plantilla_default: Mapped["Plantilla | None"] = relationship(
-        foreign_keys=[plantilla_default_id]
-    )
-    reglas: Mapped[list["ReglaAsignacion"]] = relationship(
+    plantilla: Mapped["Plantilla"] = relationship()
+    variantes: Mapped[list["VarianteImagen"]] = relationship(
         back_populates="configuracion",
         cascade="all, delete-orphan",
-        order_by="ReglaAsignacion.orden",
+        order_by="VarianteImagen.orden",
     )
 
     def __repr__(self) -> str:
         return (
-            f"<ConfiguracionMultiplantillaje(id={self.id}, "
-            f"cliente_id={self.cliente_id}, "
-            f"plantilla_default_id={self.plantilla_default_id})>"
+            f"<ConfiguracionLado(id={self.id}, plantilla_id={self.plantilla_id}, "
+            f"lado='{self.lado}')>"
         )
 
 
-class ReglaAsignacion(Base):
-    """Regla con destino, compuesta por una o más Condicion_Asignacion en AND (Req 3.1).
+class VarianteImagen(Base):
+    """Una imagen de fondo candidata con sus condiciones (AND).
 
-    `atributo`/`valor` ya NO viven aquí: se trasladaron a `CondicionAsignacion`.
-    Una regla coincide solo si TODAS sus condiciones se cumplen. El campo `orden`
-    define la precedencia de evaluación de la regla (Req 5.5).
+    `imagen_path` es la RUTA de la imagen de fondo (no una Plantilla). `orden`
+    define la precedencia: gana la primera variante coincidente.
     """
-    __tablename__ = "reglas_asignacion"
+    __tablename__ = "variantes_imagen"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     configuracion_id: Mapped[int] = mapped_column(
-        Integer,
-        ForeignKey("configuraciones_multiplantillaje.id", ondelete="CASCADE"),
+        Integer, ForeignKey("configuraciones_lado.id", ondelete="CASCADE"),
         nullable=False,
     )
-    plantilla_destino_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("plantillas.id", ondelete="CASCADE"), nullable=False,
-    )
+    imagen_path: Mapped[str] = mapped_column(String(500), nullable=False)
     orden: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
-    # Relaciones
-    configuracion: Mapped["ConfiguracionMultiplantillaje"] = relationship(
-        back_populates="reglas"
+    configuracion: Mapped["ConfiguracionLado"] = relationship(
+        back_populates="variantes"
     )
-    plantilla_destino: Mapped["Plantilla"] = relationship(
-        foreign_keys=[plantilla_destino_id]
-    )
-    # Condiciones en conjunción (AND). Ordenadas por `orden`; borrado en cascada
-    # para que al eliminar una regla desaparezcan sus condiciones (Req 3.3).
-    condiciones: Mapped[list["CondicionAsignacion"]] = relationship(
-        back_populates="regla",
+    condiciones: Mapped[list["CondicionVariante"]] = relationship(
+        back_populates="variante",
         cascade="all, delete-orphan",
-        order_by="CondicionAsignacion.orden",
+        order_by="CondicionVariante.orden",
     )
 
     def __repr__(self) -> str:
         return (
-            f"<ReglaAsignacion(id={self.id}, "
+            f"<VarianteImagen(id={self.id}, "
             f"configuracion_id={self.configuracion_id}, "
-            f"plantilla_destino_id={self.plantilla_destino_id}, "
-            f"orden={self.orden})>"
+            f"imagen_path='{self.imagen_path}', orden={self.orden})>"
         )
 
 
-class CondicionAsignacion(Base):
-    """Condición 'atributo igual a valor' de una Regla_Asignacion (Req 3.1).
+class CondicionVariante(Base):
+    """Condición 'atributo igual a valor' de una VarianteImagen (AND).
 
-    Una Regla_Asignacion coincide únicamente cuando TODAS sus condiciones se
-    cumplen (conjunción lógica Y). `orden` ordena las condiciones dentro de la
-    regla para una presentación/serialización estable.
+    La variante coincide solo cuando TODAS sus condiciones se cumplen.
     """
-    __tablename__ = "condiciones_asignacion"
+    __tablename__ = "condiciones_variante"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    regla_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("reglas_asignacion.id", ondelete="CASCADE"),
+    variante_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("variantes_imagen.id", ondelete="CASCADE"),
         nullable=False,
     )
     atributo: Mapped[str] = mapped_column(String(100), nullable=False)
     valor: Mapped[str] = mapped_column(String(255), nullable=False)
     orden: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
-    regla: Mapped["ReglaAsignacion"] = relationship(back_populates="condiciones")
+    variante: Mapped["VarianteImagen"] = relationship(back_populates="condiciones")
 
     def __repr__(self) -> str:
         return (
-            f"<CondicionAsignacion(id={self.id}, regla_id={self.regla_id}, "
+            f"<CondicionVariante(id={self.id}, variante_id={self.variante_id}, "
             f"atributo='{self.atributo}', valor='{self.valor}', "
             f"orden={self.orden})>"
         )

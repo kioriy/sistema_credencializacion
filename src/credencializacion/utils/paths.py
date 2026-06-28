@@ -211,3 +211,30 @@ def get_bundled_plantilla_base() -> Path | None:
         except Exception:  # noqa: BLE001
             continue
     return None
+
+
+def _slugify(nombre: str) -> str:
+    """Convierte un nombre de cliente en un nombre de carpeta seguro."""
+    import re
+
+    base = (nombre or "cliente").strip().lower()
+    base = re.sub(r"[^a-z0-9._-]+", "_", base)
+    base = base.strip("_") or "cliente"
+    return base[:80]
+
+
+def get_img_dir(cliente_nombre: str | None = None) -> Path:
+    """Directorio de imágenes subidas desde archivo (build-safe, estable).
+
+    Igual que ``plantilla_base``: en la app empaquetada vive en la carpeta de
+    datos estable del usuario (fuera del directorio de la app, para que las
+    actualizaciones no la borren); en desarrollo, bajo la raíz del proyecto.
+    La estructura es ``.../data/img/{nombre_cliente}`` (Decisión del usuario).
+
+    Crea el directorio si no existe.
+    """
+    base = get_data_dir() / "img"
+    if cliente_nombre:
+        base = base / _slugify(cliente_nombre)
+    base.mkdir(parents=True, exist_ok=True)
+    return base
