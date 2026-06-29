@@ -463,6 +463,15 @@ class ControlPanel(QWidget):
             active_bg="#D97706",
         ))
 
+        self._pill_no_form = QPushButton("📋 Sin formulario: 0")
+        self._pill_no_form.setCheckable(True)
+        self._pill_no_form.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._pill_no_form.setStyleSheet(pill_base.format(
+            bg="#FFF7ED", fg="#EA580C", border="#FED7AA",
+            hover_border="#EA580C", hover_bg="#FFEDD5",
+            active_bg="#EA580C",
+        ))
+
         self._pill_pending = QPushButton("📝 Pendientes: 0")
         self._pill_pending.setCheckable(True)
         self._pill_pending.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
@@ -474,12 +483,14 @@ class ControlPanel(QWidget):
 
         self._pill_all.clicked.connect(lambda: self._apply_status_filter(None))
         self._pill_ready.clicked.connect(lambda: self._apply_status_filter("ready"))
-        self._pill_no_photo.clicked.connect(lambda: self._apply_status_filter("no_photo"))
+        self._pill_no_photo.clicked.connect(lambda: self._apply_status_filter("sin_fotografia"))
+        self._pill_no_form.clicked.connect(lambda: self._apply_status_filter("sin_formulario"))
         self._pill_pending.clicked.connect(lambda: self._apply_status_filter("pending"))
 
         row.addWidget(self._pill_all)
         row.addWidget(self._pill_ready)
         row.addWidget(self._pill_no_photo)
+        row.addWidget(self._pill_no_form)
         row.addWidget(self._pill_pending)
         row.addStretch()
 
@@ -952,13 +963,29 @@ class ControlPanel(QWidget):
         """Filtra registros por texto de búsqueda en cualquier campo."""
         self._apply_filters()
 
+    @staticmethod
+    def _display_status(reg: "Registro") -> str:
+        """Estado visible de la credencial (credential_display_status del API).
+
+        Si el registro no trae el campo, cae a una heurística equivalente.
+        """
+        val = (reg.get_dato("credential_display_status", "") or "").strip()
+        if val:
+            return val
+        if not reg.photo_path:
+            return "sin_fotografia"
+        if reg.credential_status == "ready":
+            return "ready"
+        return "pending"
+
     def _apply_status_filter(self, status: str | None) -> None:
         """Aplica un filtro de estado y actualiza las pills."""
         self._active_status_filter = status
         # Actualizar estado checked de las pills
         self._pill_all.setChecked(status is None)
         self._pill_ready.setChecked(status == "ready")
-        self._pill_no_photo.setChecked(status == "no_photo")
+        self._pill_no_photo.setChecked(status == "sin_fotografia")
+        self._pill_no_form.setChecked(status == "sin_formulario")
         self._pill_pending.setChecked(status == "pending")
         self._apply_filters()
 
@@ -974,14 +1001,10 @@ class ControlPanel(QWidget):
 
         records = list(self._all_records)
 
-        # Filtro de estado
+        # Filtro de estado por credential_display_status.
         status = self._active_status_filter
-        if status == "ready":
-            records = [r for r in records if r.credential_status == "ready"]
-        elif status == "no_photo":
-            records = [r for r in records if not r.photo_path]
-        elif status == "pending":
-            records = [r for r in records if r.credential_status in ("pending", "", None)]
+        if status:
+            records = [r for r in records if self._display_status(r) == status]
 
         # Filtro de texto
         query = self._search_input.text().strip().lower()
@@ -1028,17 +1051,21 @@ class ControlPanel(QWidget):
             self._pill_all.setText("📋 Todos: 0")
             self._pill_ready.setText("✅ Listos: 0")
             self._pill_no_photo.setText("📷 Sin foto: 0")
+            self._pill_no_form.setText("📋 Sin formulario: 0")
             self._pill_pending.setText("📝 Pendientes: 0")
             return
 
         total = len(self._all_records)
-        ready = sum(1 for r in self._all_records if r.credential_status == "ready")
-        no_photo = sum(1 for r in self._all_records if not r.photo_path)
-        pending = sum(1 for r in self._all_records if r.credential_status in ("pending", "", None))
+        estados = [self._display_status(r) for r in self._all_records]
+        ready = sum(1 for e in estados if e == "ready")
+        no_photo = sum(1 for e in estados if e == "sin_fotografia")
+        no_form = sum(1 for e in estados if e == "sin_formulario")
+        pending = sum(1 for e in estados if e == "pending")
 
         self._pill_all.setText(f"📋 Todos: {total}")
         self._pill_ready.setText(f"✅ Listos: {ready}")
         self._pill_no_photo.setText(f"📷 Sin foto: {no_photo}")
+        self._pill_no_form.setText(f"📋 Sin formulario: {no_form}")
         self._pill_pending.setText(f"📝 Pendientes: {pending}")
 
     def _load_client_templates(self, cliente_id: int) -> None:

@@ -474,6 +474,7 @@ class PropertiesPanel(QWidget):
         self._combo_render_as = QComboBox()
         self._combo_render_as.addItems(["Texto", "Código QR", "Código de Barras"])
         self._combo_render_as.setStyleSheet(self._input_style())
+        self._stretch_combo(self._combo_render_as)
         self._combo_render_as.currentTextChanged.connect(self._on_render_as_changed)
         self._f_dyn.addRow("Formato:", self._combo_render_as)
 
@@ -482,6 +483,7 @@ class PropertiesPanel(QWidget):
         self._combo_align = QComboBox()
         self._combo_align.addItems(["Izquierda", "Centro", "Derecha"])
         self._combo_align.setStyleSheet(self._input_style())
+        self._stretch_combo(self._combo_align)
         self._combo_align.currentIndexChanged.connect(
             lambda i: self.property_changed.emit(
                 "alignment", self._ALIGN_VALUES[i] if 0 <= i < len(self._ALIGN_VALUES) else "left"
@@ -492,6 +494,7 @@ class PropertiesPanel(QWidget):
         self._combo_barcode_format = QComboBox()
         self._combo_barcode_format.addItems(["Code128", "EAN13"])
         self._combo_barcode_format.setStyleSheet(self._input_style())
+        self._stretch_combo(self._combo_barcode_format)
         self._combo_barcode_format.currentTextChanged.connect(
             lambda v: self.property_changed.emit("barcode_format", v)
         )
@@ -517,6 +520,7 @@ class PropertiesPanel(QWidget):
         from credencializacion.services.text_rules import TEXT_RULES
         self._combo_text_rule = QComboBox()
         self._combo_text_rule.setStyleSheet(self._input_style())
+        self._stretch_combo(self._combo_text_rule)
         for _rule in TEXT_RULES:
             self._combo_text_rule.addItem(_rule["label"], _rule["id"])
         self._combo_text_rule.currentIndexChanged.connect(
@@ -530,6 +534,7 @@ class PropertiesPanel(QWidget):
         self._combo_img_source = QComboBox()
         self._combo_img_source.addItems(["Atributo", "Archivo"])
         self._combo_img_source.setStyleSheet(self._input_style())
+        self._stretch_combo(self._combo_img_source)
         self._combo_img_source.currentTextChanged.connect(self._on_img_source_changed)
         self._row_img_source = self._f_dyn.addRow("Origen:", self._combo_img_source)
 
@@ -543,6 +548,7 @@ class PropertiesPanel(QWidget):
 
         self._combo_img_attr = QComboBox()
         self._combo_img_attr.setStyleSheet(self._input_style())
+        self._stretch_combo(self._combo_img_attr)
         self._combo_img_attr.currentIndexChanged.connect(
             lambda _i: self.property_changed.emit(
                 "campo_dato", self._combo_img_attr.currentData() or ""
@@ -567,6 +573,22 @@ class PropertiesPanel(QWidget):
         layout.addWidget(self._lbl_empty)
 
         layout.addStretch()
+
+    @staticmethod
+    def _stretch_combo(combo: QComboBox) -> None:
+        """Hace que un QComboBox llene el ancho del contenedor de propiedades.
+
+        Por defecto el combo ajusta su ancho al contenido; con esto se expande
+        al ancho disponible del formulario sin que los textos largos lo
+        desborden.
+        """
+        combo.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        combo.setMinimumContentsLength(0)
 
     def _input_style(self) -> str:
         """Retorna stylesheet compartido para inputs del panel."""

@@ -55,8 +55,11 @@ MAIN_BG = "#F5F7FA"
 STATUS_COLORS: dict[str, tuple[str, str]] = {
     # estado: (background, text_color)
     "sin_foto": (WARNING, "#FFFFFF"),
+    "sin_fotografia": (WARNING, "#FFFFFF"),
+    "sin_formulario": ("#F97316", "#FFFFFF"),
     "pending": (WARNING, "#FFFFFF"),
     "pendiente": ("#94A3B8", "#FFFFFF"),
+    "printing": (INFO_BLUE, "#FFFFFF"),
     "impreso": (SUCCESS, "#FFFFFF"),
     "error": (ERROR, "#FFFFFF"),
     "en_cola": (INFO_BLUE, "#FFFFFF"),
@@ -67,15 +70,27 @@ STATUS_COLORS: dict[str, tuple[str, str]] = {
 
 # Columnas de la tabla
 COLUMNS = [
-    " ",          # 0: Checkbox
-    "FOTO",       # 1: Thumbnail
-    "ID",         # 2: Matrícula / enrollment code
-    "NOMBRE",     # 3: Nombre completo
-    "GRADO",      # 4: Grado
-    "GRUPO",      # 5: Grupo
-    "ESTADO",     # 6: Badge de estado
-    "ACCIÓN",     # 7: Botón agregar a cola
+    " ",                # 0: Checkbox
+    "FOTO",             # 1: Thumbnail
+    "ID",               # 2: Matrícula / enrollment code
+    "NOMBRE",           # 3: Nombre(s)
+    "APELLIDOS",        # 4: Apellidos
+    "GRADO",            # 5: Grado
+    "GRUPO",            # 6: Grupo
+    "ESTADO",           # 7: Badge de estado (credential_display_status)
+    "ACCIÓN",           # 8: Botón agregar a cola
 ]
+
+# Índices de columna (única fuente de verdad para evitar descuadres).
+COL_CHECK = 0
+COL_PHOTO = 1
+COL_ID = 2
+COL_NOMBRE = 3
+COL_APELLIDOS = 4
+COL_GRADO = 5
+COL_GRUPO = 6
+COL_ESTADO = 7
+COL_ACCION = 8
 
 PHOTO_SIZE = 32
 
@@ -217,22 +232,23 @@ class RecordTable(QTableWidget):
 
         # Configurar anchos de columna
         header = self.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)   # Checkbox
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)   # Foto
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)   # ID
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch) # Nombre
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)   # Grado
-        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)   # Grupo
-        header.setSectionResizeMode(6, QHeaderView.ResizeMode.Fixed)   # Estado
-        header.setSectionResizeMode(7, QHeaderView.ResizeMode.Fixed)   # Acción
+        header.setSectionResizeMode(COL_CHECK, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(COL_PHOTO, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(COL_ID, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(COL_NOMBRE, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(COL_APELLIDOS, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(COL_GRADO, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(COL_GRUPO, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(COL_ESTADO, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(COL_ACCION, QHeaderView.ResizeMode.Fixed)
 
-        self.setColumnWidth(0, 40)   # Checkbox
-        self.setColumnWidth(1, 50)   # Foto
-        self.setColumnWidth(2, 80)   # ID
-        self.setColumnWidth(4, 70)   # Grado
-        self.setColumnWidth(5, 70)   # Grupo
-        self.setColumnWidth(6, 130)  # Estado
-        self.setColumnWidth(7, 70)   # Acción
+        self.setColumnWidth(COL_CHECK, 40)
+        self.setColumnWidth(COL_PHOTO, 50)
+        self.setColumnWidth(COL_ID, 80)
+        self.setColumnWidth(COL_GRADO, 70)
+        self.setColumnWidth(COL_GRUPO, 70)
+        self.setColumnWidth(COL_ESTADO, 130)
+        self.setColumnWidth(COL_ACCION, 70)
 
         # Comportamiento
         self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -312,9 +328,9 @@ class RecordTable(QTableWidget):
     def set_photo_by_id(self, reg_id: int, pixmap: QPixmap) -> None:
         """Asigna una foto circular a la fila que corresponda al ID dado."""
         for row in range(self.rowCount()):
-            chk_item = self.item(row, 0)
+            chk_item = self.item(row, COL_CHECK)
             if chk_item and chk_item.data(Qt.ItemDataRole.UserRole) == reg_id:
-                photo_item = self.item(row, 1)
+                photo_item = self.item(row, COL_PHOTO)
                 if photo_item:
                     photo_item.setIcon(QIcon(pixmap))
                 break
@@ -335,62 +351,74 @@ class RecordTable(QTableWidget):
         )
         checkbox_item.setCheckState(Qt.CheckState.Unchecked)
         checkbox_item.setData(Qt.ItemDataRole.UserRole, reg.id)
-        self.setItem(row, 0, checkbox_item)
+        self.setItem(row, COL_CHECK, checkbox_item)
 
         # Col 1: Foto circular
         photo_item = QTableWidgetItem()
         pixmap = _create_circular_pixmap(reg.photo_path or "", PHOTO_SIZE)
         photo_item.setIcon(QIcon(pixmap))
         photo_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
-        self.setItem(row, 1, photo_item)
+        self.setItem(row, COL_PHOTO, photo_item)
 
         # Col 2: ID
         enrollment = reg.enrollment_code or "—"
         id_item = QTableWidgetItem(enrollment)
         id_item.setFont(QFont("Inter", 11))
         id_item.setForeground(QColor(TEXT_LIGHT))
-        self.setItem(row, 2, id_item)
+        self.setItem(row, COL_ID, id_item)
 
-        # Col 3: NOMBRE
-        nombre = reg.nombre_completo or "Sin nombre"
+        # Col 3: NOMBRE(S)
+        nombre = reg.get_dato("nombre", "") or reg.nombre_completo or "Sin nombre"
         name_item = QTableWidgetItem(nombre)
         name_item.setFont(QFont("Inter", 12, QFont.Weight.DemiBold))
         name_item.setForeground(QColor(TEXT_DARK))
-        self.setItem(row, 3, name_item)
+        self.setItem(row, COL_NOMBRE, name_item)
 
-        # Col 4: Grado
+        # Col 4: APELLIDOS
+        apellidos = reg.get_dato("apellido", "") or reg.get_dato("apellidos", "") or "—"
+        apellidos_item = QTableWidgetItem(apellidos)
+        apellidos_item.setFont(QFont("Inter", 12))
+        apellidos_item.setForeground(QColor(TEXT_DARK))
+        self.setItem(row, COL_APELLIDOS, apellidos_item)
+
+        # Col 5: Grado
         grado_item = QTableWidgetItem(reg.get_dato("grado", "—"))
         grado_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         grado_item.setFont(QFont("Inter", 11))
-        self.setItem(row, 4, grado_item)
+        self.setItem(row, COL_GRADO, grado_item)
 
-        # Col 5: Grupo
+        # Col 6: Grupo
         group_item = QTableWidgetItem(reg.get_dato("grupo", "—"))
         group_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         group_item.setFont(QFont("Inter", 11))
-        self.setItem(row, 5, group_item)
+        self.setItem(row, COL_GRUPO, group_item)
 
-        # Col 6: Estado badge
+        # Col 7: Estado badge (credential_display_status del endpoint)
         estado = self._determine_status(reg)
         bg, fg = STATUS_COLORS.get(estado, (TEXT_LIGHT, "#FFFFFF"))
         badge = StatusBadge(self._status_label(estado), bg, fg)
-        self.setCellWidget(row, 6, badge)
+        self.setCellWidget(row, COL_ESTADO, badge)
 
-        # Col 7: Botón agregar a cola
+        # Col 8: Botón agregar a cola
         actions = AddToQueueButton(reg.id)
         actions.add_clicked.connect(lambda rid: self.add_to_queue_clicked.emit(rid)) 
-        self.setCellWidget(row, 7, actions)
+        self.setCellWidget(row, COL_ACCION, actions)
 
         # Altura de fila
         self.setRowHeight(row, 56)
 
     def _determine_status(self, reg: "Registro") -> str:
-        """Determina el estado visual de un registro.
+        """Determina el estado visual usando `credential_display_status` del API.
 
-        Prioriza: falta foto > credential_status > estado_impresion.
+        Si el endpoint provee `credential_display_status` se usa tal cual (es la
+        fuente de verdad del backend). Si no, cae al comportamiento previo
+        (falta foto > credential_status > estado_impresion).
         """
+        display = (reg.get_dato("credential_display_status", "") or "").strip()
+        if display:
+            return display
         if not reg.photo_path:
-            return "sin_foto"  # Falta foto
+            return "sin_foto"
         if reg.credential_status == "replacement_requested":
             return "replacement_requested"
         if reg.credential_status == "ready":
@@ -403,15 +431,19 @@ class RecordTable(QTableWidget):
         """Convierte un estado interno al texto visible en español."""
         labels = {
             "sin_foto": "⚠ Falta Foto",
+            "sin_fotografia": "⚠ Sin Fotografía",
+            "sin_formulario": "📋 Sin Formulario",
+            "pending": "📝 Pendiente",
             "pendiente": "📝 Pendiente",
-            "impreso": "✅ Aprobado",
+            "printing": "🖨 En Impresión",
+            "impreso": "✅ Impreso",
             "error": "❌ Error",
             "en_cola": "🔵 En Cola",
-            "ready": "✅ Aprobado",
+            "ready": "✅ Listo",
             "replacement_requested": "🔄 Renovación",
             "delivered": "📦 Entregado",
         }
-        return labels.get(estado, estado.capitalize())
+        return labels.get(estado, estado.replace("_", " ").capitalize())
 
     def get_selected_ids(self) -> list[int]:
         """Obtiene los IDs de las filas seleccionadas (selección de fila Qt).
@@ -427,7 +459,7 @@ class RecordTable(QTableWidget):
 
         selected: list[int] = []
         for row in sorted(selected_rows):
-            item = self.item(row, 0)  # Col 0 = checkbox con reg.id en UserRole
+            item = self.item(row, COL_CHECK)  # Col 0 = checkbox con reg.id en UserRole
             if item:
                 reg_id = item.data(Qt.ItemDataRole.UserRole)
                 if reg_id is not None:
@@ -447,7 +479,7 @@ class RecordTable(QTableWidget):
 
     def _on_double_click(self, row: int, _column: int) -> None:
         """Emite señal con el ID del registro al hacer doble clic."""
-        item = self.item(row, 0)
+        item = self.item(row, COL_CHECK)
         if item:
             reg_id = item.data(Qt.ItemDataRole.UserRole)
             if reg_id is not None:
@@ -459,7 +491,7 @@ class RecordTable(QTableWidget):
         if row < 0:
             return
 
-        item = self.item(row, 0)
+        item = self.item(row, COL_CHECK)
         if not item:
             return
         reg_id = item.data(Qt.ItemDataRole.UserRole)

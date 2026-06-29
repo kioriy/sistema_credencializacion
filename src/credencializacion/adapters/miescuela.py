@@ -59,6 +59,9 @@ _STUDENT_COLUMNS: list[str] = [
     "logo_escuela",
     "photo_url",
     "estado_credencial",
+    "credential_display_status",
+    "form_status",
+    "photo_status",
     "reemplazos",
     "enrollment_code",
 ]
@@ -310,6 +313,9 @@ class MiEscuelaAdapter(DataAdapter):
             "logo_escuela": school.get("logo_url", "") or "",
             "photo_url": raw.get("photo_url", "") or "",
             "estado_credencial": raw.get("credential_status", ""),
+            "credential_display_status": raw.get("credential_display_status", "") or "",
+            "form_status": raw.get("form_status"),
+            "photo_status": raw.get("photo_status"),
             "reemplazos": raw.get("credential_replacement_count", 0),
             "enrollment_code": raw.get("enrollment_code", ""),
         }
@@ -325,6 +331,30 @@ class MiEscuelaAdapter(DataAdapter):
                 "sí" if persona.get("is_primary") else "no"
             )
             record[f"autorizado_{i}_foto"] = persona.get("photo_url", "") or ""
+            # Correo del autorizado (cuando el API lo provea; admite variantes).
+            email = (
+                persona.get("email")
+                or persona.get("correo")
+                or persona.get("mail")
+                or ""
+            )
+            record[f"autorizado_{i}_email"] = email
+
+        # Correo del tutor principal (vínculo): el del autorizado is_primary con
+        # correo; si ninguno, el primero con correo disponible.
+        tutor_email = ""
+        for persona in authorized:
+            if not isinstance(persona, dict):
+                continue
+            mail = persona.get("email") or persona.get("correo") or persona.get("mail") or ""
+            if not mail:
+                continue
+            if persona.get("is_primary"):
+                tutor_email = mail
+                break
+            if not tutor_email:
+                tutor_email = mail
+        record["tutor_email"] = tutor_email
 
         # student_record: campos configurables por escuela (dinámicos). Se
         # aplanan las claves escalares sin sobrescribir atributos ya presentes.
