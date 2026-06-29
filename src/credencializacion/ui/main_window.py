@@ -61,6 +61,16 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(self.MIN_WIDTH, self.MIN_HEIGHT)
         self.resize(1280, 800)
 
+        # Ícono de la ventana (refuerza el icono en la barra de tareas).
+        try:
+            from credencializacion.utils.paths import get_app_icon_path
+            from PySide6.QtGui import QIcon
+            _icon = get_app_icon_path()
+            if _icon is not None:
+                self.setWindowIcon(QIcon(str(_icon)))
+        except Exception:  # noqa: BLE001
+            pass
+
         # Widgets principales
         self._sidebar: Sidebar | None = None
         self._stack: QStackedWidget | None = None

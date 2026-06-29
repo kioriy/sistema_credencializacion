@@ -200,6 +200,23 @@ def get_icons_dir() -> Path:
     return get_resources_dir() / "icons"
 
 
+def get_app_icon_path() -> Path | None:
+    """Ruta al icono de la aplicación, build-safe.
+
+    Prefiere ``app.ico`` (mejor para Windows / barra de tareas) y cae a
+    ``app.png``. Devuelve ``None`` si no se encuentra ninguno.
+    """
+    icons = get_icons_dir()
+    for name in ("app.ico", "app.png"):
+        p = icons / name
+        try:
+            if p.exists():
+                return p
+        except Exception:  # noqa: BLE001
+            continue
+    return None
+
+
 def get_default_templates_dir() -> Path:
     """Directorio de plantillas por defecto."""
     return get_resources_dir() / "default_templates"

@@ -158,7 +158,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    # icon="resources/icons/app.ico",  # Descomenta y pon tu ícono .ico
+    icon=str(ROOT / "resources" / "icons" / "app.ico"),
 )
 
 coll = COLLECT(
