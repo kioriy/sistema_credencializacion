@@ -150,56 +150,72 @@ def can_self_update() -> bool:
 
 
 def apply_update(zip_path: Path) -> bool:
-    """Extrae el zip en el directorio del ejecutable actual (Windows).
+    """Extrae el zip y reemplaza los archivos de la app (Windows).
 
-    El propio .exe se reemplaza tras cerrar la app mediante un script batch
-    auxiliar. La carpeta de datos del usuario vive fuera del directorio de la
-    app (ver ``utils.paths.get_data_dir``), por lo que la actualización **no
-    toca la base de datos**; aun así se excluye cualquier carpeta ``data`` del
-    copiado como defensa en profundidad.
+    El reemplazo lo realiza un script batch auxiliar que se ejecuta tras cerrar
+    la app. Usa ``robocopy`` con reintentos (``/R`` ``/W``): mientras el ``.exe``
+    siga bloqueado por el proceso en ejecución, robocopy reintenta hasta que el
+    bloqueo se libera, eliminando la condición de carrera que hacía la
+    actualización dependiente de la suerte. La carpeta de datos del usuario vive
+    fuera del directorio de la app, y aun así se excluye ``data`` por defensa.
 
     Returns:
         True si la extracción y el lanzamiento del script fueron exitosos.
     """
-    exe_dir = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path.cwd()
+    import tempfile
+
+    frozen = getattr(sys, "frozen", False)
+    exe_dir = Path(sys.executable).parent if frozen else Path.cwd()
+    exe_name = Path(sys.executable).name if frozen else "CredencializacionApp.exe"
 
     try:
-        tmp_dir = exe_dir.parent / "_update_tmp"
-        if tmp_dir.exists():
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-        tmp_dir.mkdir(parents=True, exist_ok=True)
-        with zipfile.ZipFile(zip_path, "r") as zf:
-            zf.extractall(tmp_dir)
+        # Todo el material temporal vive en el TEMP del sistema (escribible),
+        # nunca dentro del directorio de la app.
+        temp_root = Path(tempfile.gettempdir())
+        scratch = temp_root / "credencializacion_update"
+        if scratch.exists():
+            shutil.rmtree(scratch, ignore_errors=True)
+        extract_dir = scratch / "extracted"
+        extract_dir.mkdir(parents=True, exist_ok=True)
 
-        # Detectar dinámicamente la carpeta raíz extraída (no asumir un nombre
-        # fijo): si el zip contiene una única carpeta de nivel superior, esa es
-        # el origen; si no, se usa la carpeta temporal completa. Evita el fallo
-        # silencioso de xcopy cuando el nombre de la carpeta no coincide.
-        entries = [p for p in tmp_dir.iterdir()]
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            zf.extractall(extract_dir)
+
+        # Detectar la carpeta raíz extraída: si el zip contiene una única carpeta
+        # de nivel superior, esa es el origen; si no, se usa la carpeta completa.
+        entries = list(extract_dir.iterdir())
         subdirs = [p for p in entries if p.is_dir()]
         if len(subdirs) == 1 and len(entries) == 1:
             source_dir = subdirs[0]
         else:
-            source_dir = tmp_dir
+            source_dir = extract_dir
 
-        # Archivo de exclusión para xcopy: no copiar la carpeta de datos.
-        exclude_file = exe_dir.parent / "_update_exclude.txt"
-        exclude_file.write_text("\\data\\\n", encoding="utf-8")
+        bat = temp_root / "_credencializacion_apply.bat"
+        log = scratch / "update.log"
 
-        # Script .bat que reemplaza los archivos de la app y la relanza.
-        bat = exe_dir.parent / "_apply_update.bat"
-        bat.write_text(
+        # Script ASCII (sin acentos) para evitar problemas de codificación en cmd.
+        # robocopy: /E copia subcarpetas (incl. vacías); /XD data excluye datos;
+        # /R:120 /W:1 reintenta archivos bloqueados (el exe en uso) ~120s.
+        bat_lines = (
             "@echo off\r\n"
-            "timeout /t 3 /nobreak >nul\r\n"
-            f'xcopy /E /Y /I /EXCLUDE:"{exclude_file}" "{source_dir}\\*" "{exe_dir}"\r\n'
-            f'rmdir /S /Q "{tmp_dir}"\r\n'
-            f'del /Q "{exclude_file}"\r\n'
-            f'start "" "{exe_dir}\\CredencializacionApp.exe"\r\n'
-            'del "%~f0"\r\n',
-            encoding="utf-8",
+            "echo Esperando a que la aplicacion se cierre...\r\n"
+            "timeout /t 2 /nobreak >nul\r\n"
+            f'robocopy "{source_dir}" "{exe_dir}" /E /XD data /R:120 /W:1 '
+            f'/NFL /NDL /NJH /NJS /NP >"{log}" 2>&1\r\n'
+            "if %ERRORLEVEL% GEQ 8 (\r\n"
+            "  echo Error al aplicar la actualizacion. Detalles en:\r\n"
+            f"  echo {log}\r\n"
+            "  pause\r\n"
+            ")\r\n"
+            f'start "" /D "{exe_dir}" "{exe_dir}\\{exe_name}"\r\n'
+            'cd /d "%TEMP%"\r\n'
+            f'rmdir /S /Q "{scratch}" 2>nul\r\n'
+            'del "%~f0" 2>nul\r\n'
         )
+        bat.write_text(bat_lines, encoding="ascii", errors="ignore")
 
-        subprocess.Popen(["cmd", "/c", str(bat)], shell=False)
+        # Ejecutar el script desde el TEMP (no desde el directorio de la app).
+        subprocess.Popen(["cmd", "/c", str(bat)], shell=False, cwd=str(temp_root))
         return True
     except Exception as e:
         logger.error("Error al aplicar actualización: %s", e)
@@ -218,12 +234,14 @@ class _UpdaterBridge(QObject):
 
     update_available = Signal(str, str, str)  # version, asset_url, release_url
     feedback = Signal(str, str)               # message, level
+    quit_requested = Signal()                 # solicitar cierre en hilo principal
 
     def __init__(self) -> None:
         super().__init__()
         self._parent_widget = None
         self.update_available.connect(self._on_update_available)
         self.feedback.connect(self._on_feedback)
+        self.quit_requested.connect(self._on_quit_requested)
 
     def set_parent_widget(self, widget) -> None:
         self._parent_widget = widget
@@ -242,6 +260,10 @@ class _UpdaterBridge(QObject):
     def _on_feedback(self, message: str, level: str) -> None:
         from credencializacion.ui.widgets.toast import ToastManager
         ToastManager.instance().show_toast(message, level)
+
+    def _on_quit_requested(self) -> None:
+        from PySide6.QtWidgets import QApplication
+        QApplication.quit()
 
 
 # Referencia global para mantener vivo el puente durante toda la sesión.
@@ -445,7 +467,10 @@ def _show_update_dialog(version: str, asset_url: str, release_url: str, parent) 
                 # abrir el diálogo automáticamente (evita el bucle).
                 _write_attempted_version(version)
                 if apply_update(tmp):
-                    QApplication.quit()
+                    if _bridge is not None:
+                        _bridge.quit_requested.emit()
+                    else:
+                        QApplication.quit()
                 else:
                     lbl_status.setText("❌ No se pudo aplicar la actualización.")
                     btn_cancel.setEnabled(True)

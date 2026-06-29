@@ -24,7 +24,19 @@ def _is_frozen() -> bool:
 
 
 def get_app_root() -> Path:
-    """Raíz del proyecto (donde está pyproject.toml)."""
+    """Raíz del proyecto (donde está pyproject.toml) o del ejecutable.
+
+    - Empaquetada (PyInstaller): directorio que contiene el ejecutable. NUNCA
+      depende del directorio de trabajo actual (cwd), que al relanzarse vía el
+      script de actualización puede ser ``C:/Windows/System32``.
+    - Desarrollo: raíz del proyecto (sube desde src/credencializacion/utils/);
+      si no se encuentra pyproject.toml, usa el cwd.
+    """
+    if _is_frozen():
+        try:
+            return Path(sys.executable).resolve().parent
+        except Exception:  # noqa: BLE001
+            pass
     # En desarrollo: subir desde src/credencializacion/utils/
     dev_root = Path(__file__).resolve().parent.parent.parent.parent
     if (dev_root / "pyproject.toml").exists():
@@ -138,14 +150,48 @@ def get_image_cache_dir(cliente_id: int | None = None) -> Path:
 
 
 def get_resources_dir() -> Path:
-    """Directorio de recursos estáticos (iconos, fuentes, plantillas)."""
+    """Directorio de recursos estáticos (iconos, fuentes, plantillas).
+
+    En la app empaquetada los recursos se incluyen en el bundle de PyInstaller:
+    se resuelven desde ``sys._MEIPASS`` (o junto al ejecutable / ``_internal``),
+    que son de SOLO LECTURA. En desarrollo, bajo la raíz del proyecto.
+    """
+    if _is_frozen():
+        candidates: list[Path] = []
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            candidates.append(Path(meipass) / "resources")
+        try:
+            exe_dir = Path(sys.executable).resolve().parent
+            candidates.append(exe_dir / "resources")
+            candidates.append(exe_dir / "_internal" / "resources")
+        except Exception:  # noqa: BLE001
+            pass
+        for c in candidates:
+            try:
+                if c.exists():
+                    return c
+            except Exception:  # noqa: BLE001
+                continue
+        # Fallback razonable (aunque no exista aún): junto al bundle.
+        if meipass:
+            return Path(meipass) / "resources"
     return get_app_root() / "resources"
 
 
 def get_fonts_dir() -> Path:
-    """Directorio de fuentes tipográficas custom."""
+    """Directorio de fuentes tipográficas custom.
+
+    No falla si el directorio no puede crearse (en build empaquetado los
+    recursos son de solo lectura): en ese caso devuelve la ruta tal cual.
+    """
     fonts = get_resources_dir() / "fonts"
-    fonts.mkdir(parents=True, exist_ok=True)
+    try:
+        fonts.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        # Recursos de solo lectura (app empaquetada) o ruta protegida: las
+        # fuentes ya vienen incluidas en el bundle, no es necesario crearla.
+        pass
     return fonts
 
 
