@@ -561,6 +561,22 @@ class PropertiesPanel(QWidget):
         self._btn_img_file.clicked.connect(self.image_file_requested.emit)
         self._row_img_file = self._f_dyn.addRow("Archivo:", self._btn_img_file)
 
+        self._chk_circular = QCheckBox("Circular")
+        self._chk_circular.setStyleSheet(f"color: {TEXT_DARK}; font-size: 12px;")
+        self._chk_circular.toggled.connect(self._on_circular_toggled)
+        self._row_img_circular = self._f_dyn.addRow("Forma:", self._chk_circular)
+
+        self._spin_circle_radius = QDoubleSpinBox()
+        self._spin_circle_radius.setSuffix(" mm")
+        self._spin_circle_radius.setRange(0, 300)
+        self._spin_circle_radius.setDecimals(1)
+        self._spin_circle_radius.setToolTip("0 = automático (mitad del lado menor)")
+        self._spin_circle_radius.setStyleSheet(self._input_style())
+        self._spin_circle_radius.valueChanged.connect(
+            lambda v: self.property_changed.emit("circle_radius", v)
+        )
+        self._row_circle_radius = self._f_dyn.addRow("Radio:", self._spin_circle_radius)
+
         self._form.addRow(self._w_dynamic_group)
 
         layout.addWidget(self._props_container)
@@ -682,6 +698,8 @@ class PropertiesPanel(QWidget):
         self._f_dyn.setRowVisible(self._combo_img_attr, False)
         self._f_dyn.setRowVisible(self._btn_img_file, False)
         self._f_dyn.setRowVisible(self._edit_img_label, False)
+        self._f_dyn.setRowVisible(self._chk_circular, False)
+        self._f_dyn.setRowVisible(self._spin_circle_radius, False)
         self._f_dyn.setRowVisible(self._combo_text_rule, False)
         # Por defecto, mostrar las filas de fuente (se ocultan solo en imagen).
         for _w in (self._combo_font, self._spin_font_size, self._chk_bold, self._btn_color):
@@ -692,7 +710,7 @@ class PropertiesPanel(QWidget):
                        self._combo_font, self._spin_font_size, self._chk_bold,
                        self._combo_render_as,
                        self._combo_barcode_format, self._edit_test_text, self._edit_composite,
-                       self._combo_align):
+                       self._combo_align, self._chk_circular, self._spin_circle_radius):
             widget.blockSignals(True)
 
         self._spin_x.setValue(element.get("x", 0))
@@ -775,13 +793,30 @@ class PropertiesPanel(QWidget):
             self._edit_img_label.setText(props.get("label", "") or "")
             self._edit_img_label.blockSignals(False)
             self._f_dyn.setRowVisible(self._edit_img_label, True)
+            
+            # Circular
+            is_circ = props.get("is_circular", False)
+            self._chk_circular.blockSignals(True)
+            self._chk_circular.setChecked(is_circ)
+            self._chk_circular.blockSignals(False)
+            self._f_dyn.setRowVisible(self._chk_circular, True)
+
+            self._spin_circle_radius.blockSignals(True)
+            self._spin_circle_radius.setValue(props.get("circle_radius", 0.0))
+            self._spin_circle_radius.blockSignals(False)
+            self._f_dyn.setRowVisible(self._spin_circle_radius, is_circ)
 
         for widget in (self._spin_x, self._spin_y, self._spin_w, self._spin_h, 
                        self._combo_font, self._spin_font_size, self._chk_bold,
                        self._combo_render_as,
                        self._combo_barcode_format, self._edit_test_text, self._edit_composite,
-                       self._combo_align):
+                       self._combo_align, self._chk_circular, self._spin_circle_radius):
             widget.blockSignals(False)
+
+    def _on_circular_toggled(self, checked: bool) -> None:
+        self.property_changed.emit("is_circular", checked)
+        if self._current_element and self._current_element.get("type") in ("image", "photo_path"):
+            self._f_dyn.setRowVisible(self._spin_circle_radius, checked)
 
     def _on_render_as_changed(self, value: str) -> None:
         self.property_changed.emit("render_as", value)

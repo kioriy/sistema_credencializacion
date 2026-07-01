@@ -536,13 +536,34 @@ class PDFEngine:
         elif registro.photo_path and Path(str(registro.photo_path)).exists():
             img_path = str(registro.photo_path)
 
+        is_circular = props.get("is_circular", False)
+
         if img_path:
             try:
+                canvas.saveState()
+                if is_circular:
+                    cx = x + w / 2.0
+                    cy = y + h / 2.0
+                    custom_r_mm = props.get("circle_radius", 0.0)
+                    if custom_r_mm > 0:
+                        from credencializacion.renderer.coordinates import mm_to_points
+                        r = mm_to_points(custom_r_mm)
+                    else:
+                        r = (min(w, h) / 2.0) - 1.0  # Reducir un poco el radio
+                    path = canvas.beginPath()
+                    path.circle(cx, cy, r)
+                    canvas.clipPath(path, stroke=0, fill=0)
+                    
                 canvas.drawImage(
                     str(img_path), x, y, width=w, height=h,
                     preserveAspectRatio=True, mask="auto",
                 )
+                canvas.restoreState()
             except Exception as e:
+                try:
+                    canvas.restoreState()
+                except Exception:
+                    pass
                 logger.warning("Error al dibujar imagen '%s': %s", img_path, e)
         # Sin imagen disponible: se deja el espacio EN BLANCO (Req), sin
         # placeholder ni foto por defecto.

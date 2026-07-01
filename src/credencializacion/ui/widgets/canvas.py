@@ -180,7 +180,9 @@ class GraphicElement(QGraphicsItem):
 
     def _paint_image(self, painter: QPainter, props: dict, label: str) -> None:
         from pathlib import Path
-        from PySide6.QtGui import QPixmap
+        from PySide6.QtGui import QPixmap, QPainterPath
+
+        is_circular = props.get("is_circular", False)
 
         # Si hay una ruta de imagen válida en test_text, dibujar la imagen real
         test_img = props.get("test_text", "")
@@ -190,23 +192,59 @@ class GraphicElement(QGraphicsItem):
                 scaled = pixmap.scaled(
                     int(self._rect.width()),
                     int(self._rect.height()),
-                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.AspectRatioMode.KeepAspectRatioByExpanding if is_circular else Qt.AspectRatioMode.KeepAspectRatio,
                     Qt.TransformationMode.SmoothTransformation,
                 )
+                
+                painter.save()
+                
                 # Centrar dentro del rect
                 x_off = (self._rect.width() - scaled.width()) / 2
                 y_off = (self._rect.height() - scaled.height()) / 2
+                
+                if is_circular:
+                    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                    path = QPainterPath()
+                    custom_r_mm = props.get("circle_radius", 0.0)
+                    if custom_r_mm > 0:
+                        radius = custom_r_mm * MM_TO_PX
+                    else:
+                        radius = (min(self._rect.width(), self._rect.height()) / 2.0) - 1.0
+                    center_x = self._rect.x() + self._rect.width() / 2.0
+                    center_y = self._rect.y() + self._rect.height() / 2.0
+                    path.addEllipse(QPointF(center_x, center_y), radius, radius)
+                    painter.setClipPath(path)
+                
                 painter.drawPixmap(
                     int(self._rect.x() + x_off),
                     int(self._rect.y() + y_off),
                     scaled,
                 )
+                painter.restore()
                 return
 
         # Placeholder con borde y etiqueta descriptiva
+        painter.save()
+        if is_circular:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            path = QPainterPath()
+            custom_r_mm = props.get("circle_radius", 0.0)
+            if custom_r_mm > 0:
+                radius = custom_r_mm * MM_TO_PX
+            else:
+                radius = (min(self._rect.width(), self._rect.height()) / 2.0) - 1.0
+            center_x = self._rect.x() + self._rect.width() / 2.0
+            center_y = self._rect.y() + self._rect.height() / 2.0
+            path.addEllipse(QPointF(center_x, center_y), radius, radius)
+            painter.setClipPath(path)
+
         painter.setPen(QPen(QColor("#94A3B8"), 1, Qt.PenStyle.SolidLine))
         painter.setBrush(QColor("#F1F5F9"))
-        painter.drawRect(self._rect)
+        
+        if is_circular:
+            painter.drawEllipse(QPointF(center_x, center_y), radius, radius)
+        else:
+            painter.drawRect(self._rect)
         
         painter.setPen(QColor("#64748B"))
         painter.setFont(QFont("Inter", 10))
@@ -234,6 +272,8 @@ class GraphicElement(QGraphicsItem):
             label = f"▎▎▎ Código\n[{self._data.get('campo_dato', 'token')}]"
                 
         painter.drawText(self._rect, Qt.AlignmentFlag.AlignCenter, label)
+        painter.restore()
+
 
     def _paint_base_image(self, painter: QPainter, props: dict) -> None:
         """Renderiza la imagen base (plantilla de fondo) ocupando todo el lienzo."""
