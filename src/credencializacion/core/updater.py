@@ -196,10 +196,13 @@ def apply_update(zip_path: Path) -> bool:
         # Script ASCII (sin acentos) para evitar problemas de codificación en cmd.
         # robocopy: /E copia subcarpetas (incl. vacías); /XD data excluye datos;
         # /R:120 /W:1 reintenta archivos bloqueados (el exe en uso) ~120s.
+        import os
+        current_pid = os.getpid()
         bat_lines = (
             "@echo off\r\n"
             "echo Esperando a que la aplicacion se cierre...\r\n"
             "timeout /t 2 /nobreak >nul\r\n"
+            f'taskkill /F /PID {current_pid} >nul 2>&1\r\n'
             f'robocopy "{source_dir}" "{exe_dir}" /E /XD data /R:120 /W:1 '
             f'/NFL /NDL /NJH /NJS /NP >"{log}" 2>&1\r\n'
             "if %ERRORLEVEL% GEQ 8 (\r\n"

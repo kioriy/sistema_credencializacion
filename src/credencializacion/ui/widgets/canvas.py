@@ -239,8 +239,10 @@ class GraphicElement(QGraphicsItem):
             painter.setClipPath(path)
 
         painter.setPen(QPen(QColor("#94A3B8"), 1, Qt.PenStyle.SolidLine))
-        painter.setBrush(QColor("#F1F5F9"))
-        
+        if props.get("qr_white_bg", False):
+            painter.setBrush(QColor("#FFFFFF"))
+        else:
+            painter.setBrush(QColor("#F1F5F9"))
         if is_circular:
             painter.drawEllipse(QPointF(center_x, center_y), radius, radius)
         else:

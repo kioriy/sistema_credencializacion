@@ -513,6 +513,11 @@ class PropertiesPanel(QWidget):
         self._stretch_combo(self._combo_render_as)
         self._combo_render_as.currentTextChanged.connect(self._on_render_as_changed)
         self._f_dyn.addRow("Formato:", self._combo_render_as)
+        
+        self._chk_qr_bg = QCheckBox("Fondo blanco para QR")
+        self._chk_qr_bg.setStyleSheet("color: " + TEXT_DARK + "; font-family: 'Inter'; font-size: 12px;")
+        self._chk_qr_bg.toggled.connect(lambda c: self.property_changed.emit("qr_white_bg", c))
+        self._f_dyn.addRow("", self._chk_qr_bg)
 
         # Alineación del texto dentro de su caja (left / center / right).
         # El orden del combo coincide con _ALIGN_VALUES para mapear índice→valor.
@@ -744,7 +749,7 @@ class PropertiesPanel(QWidget):
         # Bloquear señales
         for widget in (self._spin_x, self._spin_y, self._spin_w, self._spin_h, 
                        self._combo_font, self._spin_font_size, self._chk_bold,
-                       self._combo_render_as,
+                       self._combo_render_as, self._chk_qr_bg,
                        self._combo_barcode_format, self._edit_test_text, self._edit_composite,
                        self._combo_align, self._chk_circular, self._spin_circle_radius):
             widget.blockSignals(True)
@@ -767,6 +772,10 @@ class PropertiesPanel(QWidget):
             if render_as == "Código de Barras":
                 self._f_dyn.setRowVisible(self._combo_barcode_format, True)
                 self._combo_barcode_format.setCurrentText(props.get("barcode_format", "Code128"))
+            
+            if render_as == "Código QR":
+                self._f_dyn.setRowVisible(self._chk_qr_bg, True)
+                self._chk_qr_bg.setChecked(props.get("qr_white_bg", False))
             
             if render_as == "Texto":
                 self._f_dyn.setRowVisible(self._edit_test_text, True)
@@ -844,7 +853,7 @@ class PropertiesPanel(QWidget):
 
         for widget in (self._spin_x, self._spin_y, self._spin_w, self._spin_h, 
                        self._combo_font, self._spin_font_size, self._chk_bold,
-                       self._combo_render_as,
+                       self._combo_render_as, self._chk_qr_bg,
                        self._combo_barcode_format, self._edit_test_text, self._edit_composite,
                        self._combo_align, self._chk_circular, self._spin_circle_radius):
             widget.blockSignals(False)

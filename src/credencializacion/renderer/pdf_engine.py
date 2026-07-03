@@ -656,6 +656,13 @@ class PDFEngine:
         tx = x + (w - qr_w * scale) / 2
         ty = y + (h - qr_h * scale) / 2
         
+        # Draw white background if requested
+        if props.get("qr_white_bg", False):
+            canvas.saveState()
+            canvas.setFillColorRGB(1, 1, 1)
+            canvas.rect(x, y, w, h, stroke=0, fill=1)
+            canvas.restoreState()
+
         d = Drawing(w, h, transform=[scale, 0, 0, scale, tx, ty])
         d.add(qr_code)
         renderPDF.draw(d, canvas, 0, 0)
