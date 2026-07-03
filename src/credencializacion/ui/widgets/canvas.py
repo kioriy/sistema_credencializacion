@@ -239,14 +239,20 @@ class GraphicElement(QGraphicsItem):
             painter.setClipPath(path)
 
         painter.setPen(QPen(QColor("#94A3B8"), 1, Qt.PenStyle.SolidLine))
-        if props.get("qr_white_bg", False):
+        
+        if props.get("qr_white_bg", False) and self._data.get("type") == "qr":
             painter.setBrush(QColor("#FFFFFF"))
+            sz = min(self._rect.width(), self._rect.height())
+            pad = 4.0
+            cx = self._rect.x() + self._rect.width() / 2.0
+            cy = self._rect.y() + self._rect.height() / 2.0
+            painter.drawRect(QRectF(cx - sz/2 - pad, cy - sz/2 - pad, sz + pad*2, sz + pad*2))
         else:
             painter.setBrush(QColor("#F1F5F9"))
-        if is_circular:
-            painter.drawEllipse(QPointF(center_x, center_y), radius, radius)
-        else:
-            painter.drawRect(self._rect)
+            if is_circular:
+                painter.drawEllipse(QPointF(center_x, center_y), radius, radius)
+            else:
+                painter.drawRect(self._rect)
         
         painter.setPen(QColor("#64748B"))
         painter.setFont(QFont("Inter", 10))
