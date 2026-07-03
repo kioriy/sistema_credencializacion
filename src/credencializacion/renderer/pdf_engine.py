@@ -644,23 +644,34 @@ class PDFEngine:
         from reportlab.graphics.barcode import qr
         qr_code = qr.QrCodeWidget(qr_content)
         qr_code.barLevel = "M"
-        
+        # Sin zona silenciosa interna: los módulos del QR llenan todo el
+        # contenedor; el margen lo aporta el fondo blanco opcional.
+        qr_code.barBorder = 0
+
         bounds = qr_code.getBounds()
         qr_w = bounds[2] - bounds[0]
         qr_h = bounds[3] - bounds[1]
 
         # Calcular factor de escala para que encaje en (w, h)
         scale = min(w / qr_w, h / qr_h)
-        
+
         # Centrar el QR dentro del rectángulo (w, h)
         tx = x + (w - qr_w * scale) / 2
         ty = y + (h - qr_h * scale) / 2
-        
+
         # Draw white background if requested
         if props.get("qr_white_bg", False):
+            pad = 1 * RL_MM  # el fondo rebasa el QR por 1 mm por lado
             canvas.saveState()
             canvas.setFillColorRGB(1, 1, 1)
-            canvas.rect(tx, ty, qr_w * scale, qr_h * scale, stroke=0, fill=1)
+            canvas.rect(
+                tx - pad,
+                ty - pad,
+                qr_w * scale + 2 * pad,
+                qr_h * scale + 2 * pad,
+                stroke=0,
+                fill=1,
+            )
             canvas.restoreState()
 
         d = Drawing(w, h, transform=[scale, 0, 0, scale, tx, ty])

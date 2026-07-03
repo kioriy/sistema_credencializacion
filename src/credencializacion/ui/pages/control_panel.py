@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
 
 from credencializacion.ui.widgets.record_table import RecordTable
 from credencializacion.ui.widgets.print_queue import PrintQueuePanel
+from credencializacion.ui.render_worker import QueueRenderWorker
 
 if TYPE_CHECKING:
     from credencializacion.db.models import Registro
@@ -53,93 +54,9 @@ _API_BASE_URL = "https://app.miescuela.net"
 _API_KEY = "7c9e6679-7425-40de-944b-e07fc1f90ae7"
 
 
-class QueueRenderWorker(QThread):
-    """Renderiza en segundo plano los PDFs (frentes y vueltas) de una cola.
-
-    Trabaja con IDs de registro + id de plantilla y produce dos PDFs (2 diseños
-    por hoja) en ``out_dir``. Abre su propia sesión de BD (solo lectura) en el
-    hilo del worker. Emite ``progress`` con mensajes de estado para el footer,
-    ``finished_ok`` con las rutas resultantes y ``failed`` ante un error.
-    """
-
-    progress = Signal(str)
-    finished_ok = Signal(str, str)  # frentes_pdf, vueltas_pdf
-    failed = Signal(str)
-
-    def __init__(self, record_ids: list[int], plantilla_id: int, out_dir: str) -> None:
-        super().__init__()
-        self._record_ids = list(record_ids)
-        self._plantilla_id = plantilla_id
-        self._out_dir = out_dir
-
-    def run(self) -> None:  # noqa: D401
-        try:
-            from pathlib import Path
-            from credencializacion.db.engine import DatabaseSession
-            from credencializacion.db.models import Plantilla, Registro
-            from credencializacion.db.repositories import LadoConfigRepository
-            from credencializacion.services.image_selection import select_imagen
-            from credencializacion.renderer.pdf_engine import PDFEngine
-
-            out_dir = Path(self._out_dir)
-            out_dir.mkdir(parents=True, exist_ok=True)
-
-            with DatabaseSession() as session:
-                plantilla = session.query(Plantilla).get(self._plantilla_id)
-                if plantilla is None:
-                    self.failed.emit("Plantilla no encontrada")
-                    return
-
-                regs_by_id = {
-                    r.id: r
-                    for r in session.query(Registro)
-                    .filter(Registro.id.in_(self._record_ids))
-                    .all()
-                }
-                render_items = [
-                    (regs_by_id[i], plantilla)
-                    for i in self._record_ids
-                    if i in regs_by_id
-                ]
-                if not render_items:
-                    self.failed.emit("No hay registros para renderizar")
-                    return
-
-                def _overrides(cara: str) -> list[str | None]:
-                    cfg = LadoConfigRepository.get_config_lado(
-                        session, self._plantilla_id, cara
-                    )
-                    if cfg is None:
-                        return [None] * len(render_items)
-                    return [
-                        select_imagen(reg.datos or {}, cfg)
-                        for reg, _ in render_items
-                    ]
-
-                engine = PDFEngine(plantilla)
-
-                self.progress.emit("🖼 Generando PDF de frentes...")
-                frentes_pdf = engine.render_queue(
-                    render_items, "frente", out_dir / "frentes.pdf",
-                    fondo_overrides=_overrides("frente"),
-                )
-
-                self.progress.emit("🖼 Generando PDF de vueltas...")
-                vueltas_pdf = engine.render_queue(
-                    render_items, "vuelta", out_dir / "vueltas.pdf",
-                    fondo_overrides=_overrides("vuelta"),
-                )
-
-            self.finished_ok.emit(str(frentes_pdf), str(vueltas_pdf))
-        except Exception as e:  # noqa: BLE001
-            logger.error("Error al renderizar cola en segundo plano: %s", e)
-            self.failed.emit(str(e))
-
-
-
 class SyncWorker(QThread):
     progress = Signal(str, str, bool)
-    finished_ok = Signal(int, int)
+    finished_ok = Signal(int, int, dict)  # escuelas, alumnos, reporte de depuración
     failed = Signal(str)
 
     def run(self) -> None:
@@ -153,6 +70,14 @@ class SyncWorker(QThread):
 
         self.progress.emit("⏳ Sincronizando escuelas con MiEscuela.net...", "info", False)
 
+        # Reporte de depuración acumulado durante la corrida.
+        total_depurados = 0
+        colas_afectadas: list[str] = []
+        escuelas_faltantes: list[str] = []
+        # Solo se comparan escuelas si /schools respondió de verdad (el
+        # fallback construye una escuela artificial y daría falsos faltantes).
+        schools_confiables = True
+
         try:
             adapter = MiEscuelaAdapter(base_url=BASE_URL, api_key=API_KEY)
 
@@ -161,6 +86,7 @@ class SyncWorker(QThread):
                 schools = adapter.fetch_schools()
             except ConnectionError:
                 self.progress.emit("⚠ Endpoint /schools no disponible, usando fallback...", "warning", False)
+                schools_confiables = False
                 records = adapter.fetch_records(school_id=1, status="all")
                 if records:
                     school_name = records[0].get("escuela", "Escuela 1")
@@ -284,14 +210,112 @@ class SyncWorker(QThread):
                         cfg["last_sync"] = datetime.now().isoformat()
                         cliente_obj.config = cfg
 
+                    # ── Depuración: registros borrados en la plataforma ──
+                    # El API devuelve el padrón completo de la escuela, así que
+                    # todo registro local que ya no venga en la respuesta fue
+                    # eliminado en app.miescuela.net. Solo se llega aquí si la
+                    # descarga tuvo datos (guard `if not raw_records` arriba),
+                    # y todo ocurre en la misma transacción que el upsert.
+                    depurados, colas = self._purge_stale_records(
+                        session, local_cliente_id, raw_records
+                    )
+                    total_depurados += depurados
+                    for nombre_cola in colas:
+                        if nombre_cola not in colas_afectadas:
+                            colas_afectadas.append(nombre_cola)
+
                 total_alumnos += len(raw_records)
 
-            self.finished_ok.emit(len(schools), total_alumnos)
+            # ── 4. Reportar escuelas que ya no existen en la plataforma ──
+            # No se eliminan localmente (arrastrarían en cascada sus
+            # plantillas y colas); solo se avisa para depuración manual.
+            if schools_confiables:
+                api_school_ids = {s.get("id") for s in schools}
+                with DatabaseSession() as session:
+                    faltantes = (
+                        session.query(Cliente)
+                        .filter(
+                            Cliente.school_api_id.isnot(None),
+                            Cliente.school_api_id.notin_(api_school_ids),
+                        )
+                        .order_by(Cliente.nombre)
+                        .all()
+                    )
+                    escuelas_faltantes = [c.nombre for c in faltantes]
+
+            reporte = {
+                "depurados": total_depurados,
+                "colas_afectadas": colas_afectadas,
+                "escuelas_faltantes": escuelas_faltantes,
+            }
+            self.finished_ok.emit(len(schools), total_alumnos, reporte)
 
         except Exception as e:
             import logging
             logging.getLogger(__name__).error("Error en sincronización API: %s", e)
             self.failed.emit(str(e))
+
+    @staticmethod
+    def _purge_stale_records(
+        session, cliente_id: int, raw_records: list[dict]
+    ) -> tuple[int, list[str]]:
+        """Elimina los registros locales que ya no existen en la plataforma.
+
+        Compara los ``enrollment_code`` del padrón descargado contra los
+        registros locales del cliente y borra los huérfanos. Los ítems de
+        colas de impresión que los referencien se eliminan en cascada
+        (FK ``ON DELETE CASCADE``); las colas afectadas ajustan su
+        ``total_registros`` y se devuelven para notificar al usuario.
+
+        Returns:
+            (número de registros depurados, nombres de colas afectadas)
+        """
+        from credencializacion.db.models import ColaImpresion, ItemCola, Registro
+
+        api_enrollments = {
+            rec.get("enrollment_code") or rec.get("matricula", "")
+            for rec in raw_records
+            if isinstance(rec, dict)
+        }
+        if not api_enrollments:
+            return 0, []
+
+        stale = (
+            session.query(Registro)
+            .filter(
+                Registro.cliente_id == cliente_id,
+                Registro.enrollment_code.isnot(None),
+                Registro.enrollment_code.notin_(api_enrollments),
+            )
+            .all()
+        )
+        if not stale:
+            return 0, []
+
+        stale_ids = [r.id for r in stale]
+
+        # Colas que referencian registros a depurar (antes de borrarlos)
+        colas_tocadas = (
+            session.query(ColaImpresion)
+            .join(ItemCola, ItemCola.cola_id == ColaImpresion.id)
+            .filter(ItemCola.registro_id.in_(stale_ids))
+            .distinct()
+            .all()
+        )
+
+        for reg in stale:
+            session.delete(reg)
+        session.flush()
+
+        # Ajustar el conteo de las colas tras la cascada de sus ítems
+        nombres_colas: list[str] = []
+        for cola in colas_tocadas:
+            cola.total_registros = (
+                session.query(ItemCola).filter_by(cola_id=cola.id).count()
+            )
+            nombres_colas.append(cola.nombre)
+
+        return len(stale_ids), nombres_colas
 
 
 class ControlPanel(QWidget):
@@ -606,10 +630,10 @@ class ControlPanel(QWidget):
             active_bg=TEXT_DARK,
         ))
 
-        self._pill_ready = QPushButton("✅ Listos: 0")
-        self._pill_ready.setCheckable(True)
-        self._pill_ready.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self._pill_ready.setStyleSheet(pill_base.format(
+        self._pill_with_photo = QPushButton("📸 Con foto: 0")
+        self._pill_with_photo.setCheckable(True)
+        self._pill_with_photo.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._pill_with_photo.setStyleSheet(pill_base.format(
             bg="#F0FDF4", fg="#16A34A", border="#BBF7D0",
             hover_border="#16A34A", hover_bg="#DCFCE7",
             active_bg="#16A34A",
@@ -624,6 +648,15 @@ class ControlPanel(QWidget):
             active_bg="#D97706",
         ))
 
+        self._pill_with_form = QPushButton("📝 Con formulario: 0")
+        self._pill_with_form.setCheckable(True)
+        self._pill_with_form.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._pill_with_form.setStyleSheet(pill_base.format(
+            bg="#EFF6FF", fg="#2563EB", border="#BFDBFE",
+            hover_border="#2563EB", hover_bg="#DBEAFE",
+            active_bg="#2563EB",
+        ))
+
         self._pill_no_form = QPushButton("📋 Sin formulario: 0")
         self._pill_no_form.setCheckable(True)
         self._pill_no_form.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
@@ -633,26 +666,17 @@ class ControlPanel(QWidget):
             active_bg="#EA580C",
         ))
 
-        self._pill_pending = QPushButton("📝 Pendientes: 0")
-        self._pill_pending.setCheckable(True)
-        self._pill_pending.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self._pill_pending.setStyleSheet(pill_base.format(
-            bg="#EFF6FF", fg="#2563EB", border="#BFDBFE",
-            hover_border="#2563EB", hover_bg="#DBEAFE",
-            active_bg="#2563EB",
-        ))
-
         self._pill_all.clicked.connect(lambda: self._apply_status_filter(None))
-        self._pill_ready.clicked.connect(lambda: self._apply_status_filter("ready"))
-        self._pill_no_photo.clicked.connect(lambda: self._apply_status_filter("sin_fotografia"))
+        self._pill_with_photo.clicked.connect(lambda: self._apply_status_filter("con_foto"))
+        self._pill_no_photo.clicked.connect(lambda: self._apply_status_filter("sin_foto"))
+        self._pill_with_form.clicked.connect(lambda: self._apply_status_filter("con_formulario"))
         self._pill_no_form.clicked.connect(lambda: self._apply_status_filter("sin_formulario"))
-        self._pill_pending.clicked.connect(lambda: self._apply_status_filter("pending"))
 
         row.addWidget(self._pill_all)
-        row.addWidget(self._pill_ready)
+        row.addWidget(self._pill_with_photo)
         row.addWidget(self._pill_no_photo)
+        row.addWidget(self._pill_with_form)
         row.addWidget(self._pill_no_form)
-        row.addWidget(self._pill_pending)
         row.addStretch()
 
         return row
@@ -1125,29 +1149,42 @@ class ControlPanel(QWidget):
         self._apply_filters()
 
     @staticmethod
-    def _display_status(reg: "Registro") -> str:
-        """Estado visible de la credencial (credential_display_status del API).
+    def _has_photo(reg: "Registro") -> bool:
+        """Indica si el registro tiene fotografía."""
+        return bool(reg.photo_path)
 
-        Si el registro no trae el campo, cae a una heurística equivalente.
+    @staticmethod
+    def _has_form(reg: "Registro") -> bool:
+        """Indica si el alumno completó su formulario (``form_status`` del API).
+
+        Si el registro no trae el campo (sincronizaciones viejas), se infiere
+        del ``credential_display_status``: el backend reporta "sin_formulario"
+        con prioridad sobre cualquier otro estado.
         """
-        val = (reg.get_dato("credential_display_status", "") or "").strip()
-        if val:
-            return val
-        if not reg.photo_path:
-            return "sin_fotografia"
-        if reg.credential_status == "ready":
-            return "ready"
-        return "pending"
+        val = reg.get_dato("form_status", None)
+        if val is not None:
+            return bool(val)
+        display = (reg.get_dato("credential_display_status", "") or "").strip()
+        return display != "sin_formulario"
+
+    def _status_filter_predicate(self, status: str):
+        """Devuelve el predicado de filtrado para una pill de estado."""
+        return {
+            "con_foto": self._has_photo,
+            "sin_foto": lambda r: not self._has_photo(r),
+            "con_formulario": self._has_form,
+            "sin_formulario": lambda r: not self._has_form(r),
+        }.get(status)
 
     def _apply_status_filter(self, status: str | None) -> None:
         """Aplica un filtro de estado y actualiza las pills."""
         self._active_status_filter = status
         # Actualizar estado checked de las pills
         self._pill_all.setChecked(status is None)
-        self._pill_ready.setChecked(status == "ready")
-        self._pill_no_photo.setChecked(status == "sin_fotografia")
+        self._pill_with_photo.setChecked(status == "con_foto")
+        self._pill_no_photo.setChecked(status == "sin_foto")
+        self._pill_with_form.setChecked(status == "con_formulario")
         self._pill_no_form.setChecked(status == "sin_formulario")
-        self._pill_pending.setChecked(status == "pending")
         self._apply_filters()
 
     def _apply_filters(self) -> None:
@@ -1162,10 +1199,12 @@ class ControlPanel(QWidget):
 
         records = list(self._all_records)
 
-        # Filtro de estado por credential_display_status.
+        # Filtro de estado (pills): foto/formulario según los datos del registro.
         status = self._active_status_filter
         if status:
-            records = [r for r in records if self._display_status(r) == status]
+            pred = self._status_filter_predicate(status)
+            if pred is not None:
+                records = [r for r in records if pred(r)]
 
         # Filtro de texto
         query = self._search_input.text().strip().lower()
@@ -1210,24 +1249,21 @@ class ControlPanel(QWidget):
         """Actualiza las numeralias con los conteos de la data actual."""
         if not hasattr(self, '_all_records') or not self._all_records:
             self._pill_all.setText("📋 Todos: 0")
-            self._pill_ready.setText("✅ Listos: 0")
+            self._pill_with_photo.setText("📸 Con foto: 0")
             self._pill_no_photo.setText("📷 Sin foto: 0")
+            self._pill_with_form.setText("📝 Con formulario: 0")
             self._pill_no_form.setText("📋 Sin formulario: 0")
-            self._pill_pending.setText("📝 Pendientes: 0")
             return
 
         total = len(self._all_records)
-        estados = [self._display_status(r) for r in self._all_records]
-        ready = sum(1 for e in estados if e == "ready")
-        no_photo = sum(1 for e in estados if e == "sin_fotografia")
-        no_form = sum(1 for e in estados if e == "sin_formulario")
-        pending = sum(1 for e in estados if e == "pending")
+        with_photo = sum(1 for r in self._all_records if self._has_photo(r))
+        with_form = sum(1 for r in self._all_records if self._has_form(r))
 
         self._pill_all.setText(f"📋 Todos: {total}")
-        self._pill_ready.setText(f"✅ Listos: {ready}")
-        self._pill_no_photo.setText(f"📷 Sin foto: {no_photo}")
-        self._pill_no_form.setText(f"📋 Sin formulario: {no_form}")
-        self._pill_pending.setText(f"📝 Pendientes: {pending}")
+        self._pill_with_photo.setText(f"📸 Con foto: {with_photo}")
+        self._pill_no_photo.setText(f"📷 Sin foto: {total - with_photo}")
+        self._pill_with_form.setText(f"📝 Con formulario: {with_form}")
+        self._pill_no_form.setText(f"📋 Sin formulario: {total - with_form}")
 
     def _load_client_templates(self, cliente_id: int) -> None:
         """Carga las plantillas del cliente seleccionado en el combo de plantillas.
@@ -1296,25 +1332,68 @@ class ControlPanel(QWidget):
         if toast:
             ToastManager.instance().show_toast(message, level)
 
+    def _set_sync_enabled(self, enabled: bool) -> None:
+        """Habilita/deshabilita el botón Sincronizar de la toolbar.
+
+        El botón vive en ``MainWindow``, que inyecta su referencia como
+        ``btn_sync_api`` al conectar señales; si el panel se usa sin esa
+        referencia (tests, standalone), simplemente no hay botón que tocar.
+        """
+        btn = getattr(self, "btn_sync_api", None)
+        if btn is not None:
+            btn.setEnabled(enabled)
+
     def _on_sync_api(self) -> None:
         """Sincroniza escuelas y alumnos desde la API de MiEscuela (asíncrono)."""
-        self.btn_sync_api.setEnabled(False)
+        if getattr(self, "_sync_worker", None) is not None:
+            self.set_status("⏳ Ya hay una sincronización en curso...", "warning", toast=False)
+            return
+
+        self._set_sync_enabled(False)
         self.set_status("Iniciando sincronización...", "info", toast=False)
-        
+
         self._sync_worker = SyncWorker()
         self._sync_worker.progress.connect(self.set_status)
         self._sync_worker.finished_ok.connect(self._on_sync_finished)
         self._sync_worker.failed.connect(self._on_sync_failed)
         self._sync_worker.start()
 
-    def _on_sync_finished(self, count_schools: int, count_students: int) -> None:
-        self.btn_sync_api.setEnabled(True)
+    def _on_sync_finished(
+        self, count_schools: int, count_students: int, reporte: dict
+    ) -> None:
+        self._set_sync_enabled(True)
         self._load_clients_combo()
-        self.set_status(f"✅ Sincronización completada — {count_schools} escuelas, {count_students} alumnos guardados.", "success", toast=True)
+
+        msg = f"✅ Sincronización completada — {count_schools} escuelas, {count_students} alumnos guardados."
+        depurados = reporte.get("depurados", 0)
+        if depurados:
+            msg += f" 🧹 {depurados} registros depurados (borrados en la plataforma)."
+        self.set_status(msg, "success", toast=True)
+
+        colas = reporte.get("colas_afectadas") or []
+        if colas:
+            self.set_status(
+                f"⚠️ La depuración quitó registros de estas colas: {', '.join(colas)}. "
+                "Usa «Actualizar PDFs» en el Centro de Impresión para regenerarlas.",
+                "warning",
+                toast=True,
+            )
+            # Refrescar el Centro de Impresión con los conteos nuevos
+            self.add_to_queue_requested.emit()
+
+        faltantes = reporte.get("escuelas_faltantes") or []
+        if faltantes:
+            self.set_status(
+                f"ℹ️ Escuelas que ya no están en la plataforma (se conservan localmente): "
+                f"{', '.join(faltantes)}",
+                "warning",
+                toast=True,
+            )
+
         self._sync_worker = None
 
     def _on_sync_failed(self, error_msg: str) -> None:
-        self.btn_sync_api.setEnabled(True)
+        self._set_sync_enabled(True)
         self.set_status(f"❌ Error de sincronización: {error_msg}", "error", toast=True)
         self._sync_worker = None
 
@@ -1473,44 +1552,6 @@ class ControlPanel(QWidget):
         if self._current_page < max_page:
             self._current_page += 1
             self._refresh_page()
-
-    def _filter_records(self, text: str) -> None:
-        """Filtra registros y vuelve a la página 1."""
-        text = text.lower().strip()
-        if not text and not self._active_status_filter:
-            self._filtered_records = None
-            self._total_records = len(self._all_records)
-        else:
-            self._filtered_records = []
-            for rec in self._all_records:
-                match_text = True
-                if text:
-                    # Validar matrícula, nombre, grado o grupo
-                    searchable = f"{rec.enrollment_code} {rec.nombre_completo} {rec.get_dato('grado', '')} {rec.get_dato('grupo', '')}".lower()
-                    match_text = text in searchable
-                
-                match_status = True
-                if self._active_status_filter:
-                    estado = rec.credential_status or "pending"
-                    if not rec.photo_path and self._active_status_filter == "no_photo":
-                        pass
-                    elif self._active_status_filter == "no_photo":
-                        match_status = False
-                    else:
-                        match_status = (estado == self._active_status_filter)
-
-                if match_text and match_status:
-                    self._filtered_records.append(rec)
-            
-            self._total_records = len(self._filtered_records)
-
-        self._current_page = 1
-        self._refresh_page()
-
-    def _filter_by_status(self, status: str | None) -> None:
-        """Filtra los registros por estado de credencial (pills)."""
-        self._active_status_filter = status
-        self._filter_records(self._search_input.text())
 
     # ── Descarga async de fotos ────────────────────────────────────
 

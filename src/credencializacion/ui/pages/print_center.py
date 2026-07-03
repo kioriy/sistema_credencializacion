@@ -31,6 +31,9 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QComboBox,
     QLineEdit,
+    QMessageBox,
+    QDialog,
+    QDialogButtonBox,
 )
 
 import qtawesome as qta
@@ -97,6 +100,74 @@ class StatCard(QFrame):
         self._lbl_value.setText(str(value))
 
 
+class CopyQueueDialog(QDialog):
+    """Diálogo para copiar una cola de impresión eligiendo la plantilla.
+
+    Muestra el nombre propuesto para la copia y un selector con las
+    plantillas de la escuela (cliente) de la cola original, con la
+    plantilla actual preseleccionada.
+    """
+
+    def __init__(
+        self,
+        nombre_original: str,
+        plantillas: list[tuple[int, str]],
+        plantilla_actual_id: int,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Copiar cola de impresión")
+        self.setMinimumWidth(420)
+        self.setStyleSheet(f"background-color: {CARD_BG}; color: {TEXT_DARK};")
+
+        input_style = f"""
+            background-color: {CARD_BG};
+            border: 1px solid {BORDER};
+            border-radius: 6px;
+            padding: 8px;
+            font-size: 13px;
+            color: {TEXT_DARK};
+        """
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(8)
+
+        lbl_nombre = QLabel("Nombre de la copia:")
+        lbl_nombre.setFont(QFont("Inter", 12, QFont.Weight.DemiBold))
+        layout.addWidget(lbl_nombre)
+
+        self._edit_nombre = QLineEdit(f"{nombre_original} — copia")
+        self._edit_nombre.setStyleSheet(input_style)
+        layout.addWidget(self._edit_nombre)
+
+        lbl_plantilla = QLabel("Plantilla a aplicar:")
+        lbl_plantilla.setFont(QFont("Inter", 12, QFont.Weight.DemiBold))
+        layout.addWidget(lbl_plantilla)
+
+        self._combo_plantillas = QComboBox()
+        self._combo_plantillas.setStyleSheet(input_style)
+        for pid, nombre in plantillas:
+            self._combo_plantillas.addItem(nombre, pid)
+        idx = self._combo_plantillas.findData(plantilla_actual_id)
+        if idx >= 0:
+            self._combo_plantillas.setCurrentIndex(idx)
+        layout.addWidget(self._combo_plantillas)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def result_values(self) -> tuple[str, int]:
+        """Devuelve (nombre de la copia, plantilla_id elegida)."""
+        nombre = self._edit_nombre.text().strip() or "Cola copiada"
+        return nombre, self._combo_plantillas.currentData()
+
+
 class PrintCenter(QWidget):
     """Centro de Impresión — gestión de colas persistentes.
 
@@ -115,6 +186,8 @@ class PrintCenter(QWidget):
         super().__init__(parent)
         self._selected_cola_id: int | None = None
         self._mark_workers: list = []
+        self._render_worker = None
+        self._render_on_done = None
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -123,39 +196,6 @@ class PrintCenter(QWidget):
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(24, 16, 24, 8)
         main_layout.setSpacing(12)
-
-        # ── Header ─────────────────────────────────────────────────
-        header = QHBoxLayout()
-        lbl_title = QLabel("Centro de Impresión")
-        lbl_title.setFont(QFont("Inter", 20, QFont.Weight.Bold))
-        lbl_title.setStyleSheet(f"color: {TEXT_DARK};")
-        header.addWidget(lbl_title)
-        header.addStretch()
-
-        btn_refresh = QPushButton()
-        btn_refresh.setIcon(qta.icon("fa5s.sync-alt", color=TEXT_DARK))
-        btn_refresh.setIconSize(QSize(16, 16))
-        btn_refresh.setText("  Actualizar")
-        btn_refresh.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        btn_refresh.setStyleSheet(f"""
-            QPushButton {{
-                background-color: transparent;
-                border: 2px solid {BORDER};
-                border-radius: 8px;
-                padding: 8px 16px;
-                color: {TEXT_DARK};
-                font-size: 13px;
-                font-weight: 600;
-            }}
-            QPushButton:hover {{
-                border-color: {PRIMARY};
-                color: {PRIMARY};
-            }}
-        """)
-        btn_refresh.clicked.connect(self.refresh_queues)
-        header.addWidget(btn_refresh)
-
-        main_layout.addLayout(header)
 
         # ── Stats Cards ────────────────────────────────────────────
         stats_layout = QHBoxLayout()
@@ -359,9 +399,9 @@ class PrintCenter(QWidget):
 
         # Tabla de ítems de la cola
         self._detail_table = QTableWidget()
-        self._detail_table.setColumnCount(5)
+        self._detail_table.setColumnCount(6)
         self._detail_table.setHorizontalHeaderLabels([
-            "#", "NOMBRE", "GRADO", "GRUPO", "ESTADO",
+            "#", "NOMBRE", "GRADO", "GRUPO", "ESTADO", "",
         ])
 
         h = self._detail_table.horizontalHeader()
@@ -370,10 +410,12 @@ class PrintCenter(QWidget):
         h.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
         h.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
         h.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
+        h.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
         self._detail_table.setColumnWidth(0, 50)
         self._detail_table.setColumnWidth(2, 70)
         self._detail_table.setColumnWidth(3, 70)
         self._detail_table.setColumnWidth(4, 140)
+        self._detail_table.setColumnWidth(5, 50)
 
         self._detail_table.verticalHeader().setVisible(False)
         self._detail_table.setShowGrid(False)
@@ -421,6 +463,26 @@ class PrintCenter(QWidget):
         action_bar.setSpacing(8)
 
         action_bar.addStretch()
+
+        # Actualizar PDFs (borra los anteriores y regenera con la plantilla vigente)
+        self._btn_update_pdfs = QPushButton()
+        self._btn_update_pdfs.setIcon(qta.icon("fa5s.sync-alt", color=TEXT_DARK))
+        self._btn_update_pdfs.setIconSize(QSize(16, 16))
+        self._btn_update_pdfs.setText("  Actualizar PDFs")
+        self._btn_update_pdfs.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._btn_update_pdfs.setStyleSheet(self._action_btn_style(False))
+        self._btn_update_pdfs.clicked.connect(self._update_queue_pdfs)
+        action_bar.addWidget(self._btn_update_pdfs)
+
+        # Copiar cola (duplica la cola eligiendo la plantilla a aplicar)
+        self._btn_copy_queue = QPushButton()
+        self._btn_copy_queue.setIcon(qta.icon("fa5s.copy", color=TEXT_DARK))
+        self._btn_copy_queue.setIconSize(QSize(16, 16))
+        self._btn_copy_queue.setText("  Copiar cola")
+        self._btn_copy_queue.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._btn_copy_queue.setStyleSheet(self._action_btn_style(False))
+        self._btn_copy_queue.clicked.connect(self._copy_selected_queue)
+        action_bar.addWidget(self._btn_copy_queue)
 
         # Abrir Frente (abre el PDF de frentes guardado en el visor del sistema)
         self._btn_print_front = QPushButton()
@@ -578,6 +640,30 @@ class PrintCenter(QWidget):
                     estado_item.setFont(QFont("Inter", 11))
                     self._detail_table.setItem(row, 4, estado_item)
 
+                    # Botón para quitar el ítem de la cola
+                    btn_remove = QPushButton()
+                    btn_remove.setIcon(qta.icon("fa5s.times-circle", color=ERROR))
+                    btn_remove.setIconSize(QSize(16, 16))
+                    btn_remove.setToolTip("Quitar de la cola")
+                    btn_remove.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+                    btn_remove.setStyleSheet("""
+                        QPushButton {
+                            background-color: transparent;
+                            border: none;
+                            padding: 4px;
+                        }
+                        QPushButton:hover { background-color: #FEE2E2; border-radius: 6px; }
+                    """)
+                    btn_remove.clicked.connect(
+                        lambda _=False, iid=item.id, nom=nombre: self._remove_queue_item(iid, nom)
+                    )
+                    cell = QWidget()
+                    cell_layout = QHBoxLayout(cell)
+                    cell_layout.setContentsMargins(0, 0, 0, 0)
+                    cell_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                    cell_layout.addWidget(btn_remove)
+                    self._detail_table.setCellWidget(row, 5, cell)
+
                     self._detail_table.setRowHeight(row, 42)
 
         except Exception as e:
@@ -609,6 +695,294 @@ class PrintCenter(QWidget):
 
         except Exception as e:
             self.set_status(f"❌ Error al eliminar: {e}", "error")
+
+    def _remove_queue_item(self, item_id: int, nombre: str) -> None:
+        """Quita un ítem de la cola seleccionada (no regenera PDFs).
+
+        Los PDFs quedan desactualizados hasta pulsar "Actualizar PDFs",
+        que renumera el orden (1..n) y los regenera.
+        """
+        if self._render_worker is not None:
+            self.set_status("⏳ Espera a que termine la generación en curso", "warning", toast=False)
+            return
+
+        from credencializacion.db.engine import DatabaseSession
+        from credencializacion.db.models import ColaImpresion, ItemCola
+
+        reply = QMessageBox.question(
+            self,
+            "Quitar de la cola",
+            f"¿Quitar a «{nombre or 'este registro'}» de la cola?\n\n"
+            "Los PDFs actuales quedarán desactualizados hasta que pulses "
+            "«Actualizar PDFs».",
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            with DatabaseSession() as session:
+                item = session.query(ItemCola).get(item_id)
+                if item is None:
+                    return
+                restantes = (
+                    session.query(ItemCola)
+                    .filter_by(cola_id=item.cola_id)
+                    .count()
+                )
+                if restantes <= 1:
+                    self.set_status(
+                        "⚠️ Es el último registro de la cola; usa «Eliminar Cola»",
+                        "warning",
+                    )
+                    return
+                cola = session.query(ColaImpresion).get(item.cola_id)
+                session.delete(item)
+                if cola is not None:
+                    cola.total_registros = restantes - 1
+                session.commit()
+        except Exception as e:
+            self.set_status(f"❌ Error al quitar el registro: {e}", "error")
+            return
+
+        self.set_status(
+            f"🗑️ «{nombre or 'Registro'}» quitado — pulsa «Actualizar PDFs» para regenerar",
+            "info",
+        )
+        self.refresh_queues(keep_selection=True)
+
+    def _update_queue_pdfs(self) -> None:
+        """Regenera los PDFs de la cola con la configuración vigente de su plantilla.
+
+        Borra los PDFs anteriores del disco, renumera el orden de los ítems
+        (1..n, por si se quitaron registros) y vuelve a renderizar en segundo
+        plano con la plantilla que la cola tiene guardada — que es la de la
+        escuela y ya incluye los cambios hechos en el editor. El estado de la
+        cola no se modifica.
+        """
+        if not self._selected_cola_id:
+            self.set_status("⚠️ Selecciona una cola primero", "warning")
+            return
+        if self._render_worker is not None:
+            self.set_status("⏳ Ya hay una generación en curso...", "warning", toast=False)
+            return
+
+        from credencializacion.db.engine import DatabaseSession
+        from credencializacion.db.models import ColaImpresion, ItemCola
+
+        cola_id = self._selected_cola_id
+
+        reply = QMessageBox.question(
+            self,
+            "Actualizar PDFs",
+            "Se eliminarán los PDFs actuales y se regenerarán con la "
+            "configuración vigente de la plantilla.\n\n¿Continuar?",
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            with DatabaseSession() as session:
+                cola = session.query(ColaImpresion).get(cola_id)
+                if cola is None:
+                    self.set_status("⚠️ Cola no encontrada", "warning")
+                    return
+                items = (
+                    session.query(ItemCola)
+                    .filter_by(cola_id=cola_id)
+                    .order_by(ItemCola.orden)
+                    .all()
+                )
+                if not items:
+                    self.set_status("⚠️ La cola está vacía", "warning")
+                    return
+
+                # Renumerar el orden (1..n) tras posibles registros quitados
+                for nuevo_orden, item in enumerate(items, start=1):
+                    item.orden = nuevo_orden
+                cola.total_registros = len(items)
+
+                # Borrar los PDFs anteriores del disco y limpiar sus rutas
+                for pdf in (cola.pdf_frente_path, cola.pdf_vuelta_path):
+                    if pdf:
+                        Path(pdf).unlink(missing_ok=True)
+                cola.pdf_frente_path = None
+                cola.pdf_vuelta_path = None
+
+                record_ids = [it.registro_id for it in items]
+                plantilla_id = items[0].plantilla_id
+                session.commit()
+        except Exception as e:
+            self.set_status(f"❌ Error al preparar la actualización: {e}", "error")
+            return
+
+        from credencializacion.utils.paths import get_cola_pdf_dir
+
+        self.set_status("🔄 Actualizando PDFs de la cola...", "info", toast=False)
+        self._start_render(
+            record_ids,
+            plantilla_id,
+            str(get_cola_pdf_dir(cola_id)),
+            lambda f, v: self._on_queue_pdfs_ready(
+                cola_id, f, v, "✅ PDFs actualizados con la plantilla vigente"
+            ),
+        )
+
+    def _copy_selected_queue(self) -> None:
+        """Copia la cola seleccionada permitiendo elegir otra plantilla.
+
+        Crea una cola nueva (estado pendiente) con los mismos registros en el
+        mismo orden, aplicando la plantilla elegida en el diálogo, y genera
+        sus PDFs en su propia carpeta. La cola original queda intacta.
+        """
+        if not self._selected_cola_id:
+            self.set_status("⚠️ Selecciona una cola primero", "warning")
+            return
+        if self._render_worker is not None:
+            self.set_status("⏳ Ya hay una generación en curso...", "warning", toast=False)
+            return
+
+        from credencializacion.db.engine import DatabaseSession
+        from credencializacion.db.models import ColaImpresion, ItemCola, Plantilla
+
+        cola_id = self._selected_cola_id
+        try:
+            with DatabaseSession() as session:
+                cola = session.query(ColaImpresion).get(cola_id)
+                items = (
+                    session.query(ItemCola)
+                    .filter_by(cola_id=cola_id)
+                    .order_by(ItemCola.orden)
+                    .all()
+                )
+                if cola is None or not items:
+                    self.set_status("⚠️ La cola está vacía", "warning")
+                    return
+                plantilla_actual = session.query(Plantilla).get(items[0].plantilla_id)
+                if plantilla_actual is None:
+                    self.set_status("⚠️ La plantilla de la cola ya no existe", "warning")
+                    return
+                plantillas = (
+                    session.query(Plantilla)
+                    .filter_by(cliente_id=plantilla_actual.cliente_id)
+                    .order_by(Plantilla.nombre)
+                    .all()
+                )
+                opciones = [(p.id, p.nombre) for p in plantillas]
+                nombre_original = cola.nombre
+                plantilla_actual_id = plantilla_actual.id
+                record_ids = [it.registro_id for it in items]
+        except Exception as e:
+            self.set_status(f"❌ Error al leer la cola: {e}", "error")
+            return
+
+        dlg = CopyQueueDialog(nombre_original, opciones, plantilla_actual_id, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        nuevo_nombre, plantilla_id = dlg.result_values()
+        if not plantilla_id:
+            self.set_status("⚠️ Selecciona una plantilla", "warning")
+            return
+
+        try:
+            with DatabaseSession() as session:
+                nueva = ColaImpresion(
+                    nombre=nuevo_nombre,
+                    total_registros=len(record_ids),
+                )
+                session.add(nueva)
+                session.flush()
+                for orden, reg_id in enumerate(record_ids, start=1):
+                    session.add(
+                        ItemCola(
+                            cola_id=nueva.id,
+                            registro_id=reg_id,
+                            plantilla_id=plantilla_id,
+                            orden=orden,
+                        )
+                    )
+                session.commit()
+                nueva_id = nueva.id
+        except Exception as e:
+            self.set_status(f"❌ Error al copiar la cola: {e}", "error")
+            return
+
+        from credencializacion.utils.paths import get_cola_pdf_dir
+
+        self.refresh_queues(keep_selection=True)
+        self.set_status("📋 Generando PDFs de la copia...", "info", toast=False)
+
+        def _on_copy_done(frentes: str, vueltas: str) -> None:
+            # Seleccionar la copia al terminar para verla de inmediato
+            self._selected_cola_id = nueva_id
+            self._on_queue_pdfs_ready(
+                nueva_id, frentes, vueltas, "✅ Cola copiada y PDFs generados"
+            )
+
+        self._start_render(
+            record_ids,
+            plantilla_id,
+            str(get_cola_pdf_dir(nueva_id)),
+            _on_copy_done,
+        )
+
+    def _on_queue_pdfs_ready(
+        self, cola_id: int, frentes_pdf: str, vueltas_pdf: str, mensaje: str
+    ) -> None:
+        """Guarda las rutas de los PDFs regenerados y refresca la vista."""
+        from credencializacion.db.engine import DatabaseSession
+        from credencializacion.db.models import ColaImpresion
+
+        try:
+            with DatabaseSession() as session:
+                cola = session.query(ColaImpresion).get(cola_id)
+                if cola is not None:
+                    cola.pdf_frente_path = frentes_pdf
+                    cola.pdf_vuelta_path = vueltas_pdf
+                    session.commit()
+        except Exception as e:
+            self.set_status(f"❌ Error al guardar PDFs de la cola: {e}", "error")
+            return
+
+        self.set_status(mensaje, "success")
+        self.refresh_queues(keep_selection=True)
+
+    # ── Render en segundo plano ─────────────────────────────────────
+
+    def _start_render(self, record_ids, plantilla_id, out_dir, on_done) -> None:
+        """Lanza un ``QueueRenderWorker`` y enruta sus señales.
+
+        ``on_done`` se invoca en el hilo principal con (frentes_pdf,
+        vueltas_pdf) cuando el render termina correctamente.
+        """
+        from credencializacion.ui.render_worker import QueueRenderWorker
+
+        self._render_on_done = on_done
+        self._render_worker = QueueRenderWorker(record_ids, plantilla_id, out_dir)
+        self._render_worker.progress.connect(
+            lambda m: self.set_status(m, "info", toast=False)
+        )
+        self._render_worker.finished_ok.connect(self._on_render_ok)
+        self._render_worker.failed.connect(self._on_render_failed)
+        self._render_worker.finished.connect(self._cleanup_render_worker)
+        self._set_render_buttons_enabled(False)
+        self._render_worker.start()
+
+    def _on_render_ok(self, frentes_pdf: str, vueltas_pdf: str) -> None:
+        cb = self._render_on_done
+        if cb is not None:
+            cb(frentes_pdf, vueltas_pdf)
+
+    def _on_render_failed(self, message: str) -> None:
+        self.set_status(f"❌ Error al generar PDFs: {message}", "error")
+
+    def _cleanup_render_worker(self) -> None:
+        self._render_worker = None
+        self._render_on_done = None
+        self._set_render_buttons_enabled(True)
+
+    def _set_render_buttons_enabled(self, enabled: bool) -> None:
+        self._btn_update_pdfs.setEnabled(enabled)
+        self._btn_copy_queue.setEnabled(enabled)
 
     def _open_side_pdf(self, cara: str) -> None:
         """Abre el PDF guardado (frente o vuelta) de la cola en el visor del SO."""
@@ -790,11 +1164,16 @@ class PrintCenter(QWidget):
 
     # ── Métodos públicos ───────────────────────────────────────────
 
-    def refresh_queues(self) -> None:
-        """Recarga la lista de colas desde la BD."""
+    def refresh_queues(self, keep_selection: bool = False) -> None:
+        """Recarga la lista de colas desde la BD.
+
+        Con ``keep_selection`` se re-selecciona la cola que estaba activa
+        (si sigue existiendo) para no perder el detalle en pantalla.
+        """
         from credencializacion.db.engine import DatabaseSession
         from credencializacion.db.models import ColaImpresion
 
+        selected_id = self._selected_cola_id if keep_selection else None
         self._queue_list.clear()
 
         try:
@@ -833,6 +1212,8 @@ class PrintCenter(QWidget):
                     item.setSizeHint(QSize(0, 52))
 
                     self._queue_list.addItem(item)
+                    if selected_id is not None and cola.id == selected_id:
+                        self._queue_list.setCurrentItem(item)
 
         except Exception as e:
             logger.error("Error al cargar colas: %s", e)

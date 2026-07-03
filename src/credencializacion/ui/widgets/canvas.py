@@ -58,6 +58,7 @@ class GraphicElement(QGraphicsItem):
         w = self._data.get("width", 30) * MM_TO_PX
         h = self._data.get("height", 10) * MM_TO_PX
 
+        self.prepareGeometryChange()
         self.setPos(x, y)
         self._rect = QRectF(0, 0, w, h)
         
@@ -65,6 +66,11 @@ class GraphicElement(QGraphicsItem):
         self.update()
 
     def boundingRect(self) -> QRectF:
+        props = self._data.get("properties", {})
+        if props.get("qr_white_bg", False):
+            # El fondo blanco del QR rebasa el contenedor por 1 mm por lado.
+            pad = 1.0 * MM_TO_PX
+            return self._rect.adjusted(-pad, -pad, pad, pad)
         return self._rect
 
     def paint(self, painter: QPainter, option, widget=None) -> None:
@@ -240,12 +246,19 @@ class GraphicElement(QGraphicsItem):
 
         painter.setPen(QPen(QColor("#94A3B8"), 1, Qt.PenStyle.SolidLine))
         
-        if props.get("qr_white_bg", False) and self._data.get("type") == "qr":
+        is_qr_render = (
+            self._data.get("type") == "qr"
+            or props.get("render_as") == "Código QR"
+        )
+        if props.get("qr_white_bg", False) and is_qr_render:
             painter.setBrush(QColor("#FFFFFF"))
             sz = min(self._rect.width(), self._rect.height())
+            pad = 1.0 * MM_TO_PX  # el fondo rebasa el QR por 1 mm por lado
             cx = self._rect.x() + self._rect.width() / 2.0
             cy = self._rect.y() + self._rect.height() / 2.0
-            painter.drawRect(QRectF(cx - sz/2, cy - sz/2, sz, sz))
+            painter.drawRect(
+                QRectF(cx - sz/2 - pad, cy - sz/2 - pad, sz + pad*2, sz + pad*2)
+            )
         else:
             painter.setBrush(QColor("#F1F5F9"))
             if is_circular:

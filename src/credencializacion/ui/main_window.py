@@ -133,6 +133,8 @@ class MainWindow(QMainWindow):
         self.btn_preview.clicked.connect(self._control_panel._on_preview)
         self.btn_add_queue.clicked.connect(self._control_panel._add_selected_to_queue)
         self.btn_sync.clicked.connect(self._control_panel._on_sync_api)
+        # El panel deshabilita este botón mientras la sincronización corre
+        self._control_panel.btn_sync_api = self.btn_sync
 
     # --------------------------------------------------------- toolbars
     def _create_toolbars(self) -> None:
