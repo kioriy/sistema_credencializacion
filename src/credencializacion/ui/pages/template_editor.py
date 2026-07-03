@@ -109,6 +109,9 @@ class CanvasToolbar(QWidget):
         ("text",       "📞",  "Teléfono",            "telefono"),
     ]
 
+    item_dragged = Signal(str)
+    template_name_changed = Signal(str)
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setFixedWidth(210)
@@ -144,6 +147,27 @@ class CanvasToolbar(QWidget):
         self._lbl_client.setStyleSheet(f"font-size: 11px; color: {TEXT_LIGHT};")
         self._lbl_client.setWordWrap(True)
         h_lay.addWidget(self._lbl_client)
+
+        self._edit_template_name = QLineEdit()
+        self._edit_template_name.setPlaceholderText("Nombre de la plantilla")
+        self._edit_template_name.setStyleSheet(f"""
+            QLineEdit {{
+                background: transparent;
+                border: 1px solid transparent;
+                font-size: 12px;
+                font-weight: bold;
+                color: {PRIMARY};
+                padding: 2px 0;
+            }}
+            QLineEdit:focus {{
+                background: {MAIN_BG};
+                border: 1px solid {PRIMARY};
+                border-radius: 4px;
+                padding: 2px 4px;
+            }}
+        """)
+        self._edit_template_name.editingFinished.connect(self._on_template_name_finished)
+        h_lay.addWidget(self._edit_template_name)
 
         # Banner de alerta sync (oculto por defecto)
         self._banner_sync = QLabel("⚠ Sincroniza para ver\natributos del cliente")
@@ -256,6 +280,18 @@ class CanvasToolbar(QWidget):
                 lambda checked, d=drag_data: self.item_dragged.emit(d)
             )
             self._attr_layout.addWidget(btn)
+
+    def _on_template_name_finished(self) -> None:
+        new_name = self._edit_template_name.text().strip()
+        if new_name:
+            self.template_name_changed.emit(new_name)
+        else:
+            # Revert to old name if empty (will be handled by TemplateEditor restoring it, or we can just not emit)
+            pass
+
+    def set_template_name(self, name: str) -> None:
+        self._edit_template_name.setText(name)
+        self._edit_template_name.setCursorPosition(0)
 
     def set_client_label(self, nombre: str, last_sync: str, *, sync_needed: bool = False) -> None:
         """Actualiza la etiqueta del cliente activo y el banner de sync."""
@@ -1309,6 +1345,7 @@ class TemplateEditor(QWidget):
     def _connect_signals(self) -> None:
         """Conecta señales internas del editor."""
         self._canvas_toolbar.item_dragged.connect(self._on_tool_dragged)
+        self._canvas_toolbar.template_name_changed.connect(self._on_template_name_changed)
         self._layers_panel.layer_selected.connect(self._on_layer_selected)
         self._properties_panel.property_changed.connect(self._on_property_changed)
         self._properties_panel.image_file_requested.connect(
@@ -1325,6 +1362,7 @@ class TemplateEditor(QWidget):
         """
         self._plantilla = plantilla
         self.set_orientation(plantilla.orientacion == "horizontal")
+        self._canvas_toolbar.set_template_name(plantilla.nombre)
 
         # Actualizar canvas
         from credencializacion.ui.widgets.canvas import GraphicElement
@@ -1741,6 +1779,7 @@ class TemplateEditor(QWidget):
                 from sqlalchemy.orm.attributes import flag_modified
                 plantilla_db = session.query(Plantilla).get(self._plantilla.id)
                 if plantilla_db:
+                    plantilla_db.nombre = self._plantilla.nombre
                     plantilla_db.elementos_frente = list(self._plantilla.elementos_frente)
                     plantilla_db.elementos_vuelta = list(self._plantilla.elementos_vuelta)
                     plantilla_db.orientacion = self._plantilla.orientacion
@@ -2420,3 +2459,9 @@ class TemplateEditor(QWidget):
         except Exception:  # noqa: BLE001
             return True  # ante la duda, no borrar
         return False
+
+    def _on_template_name_changed(self, new_name: str) -> None:
+        """Actualiza el nombre de la plantilla actual."""
+        if self._plantilla:
+            self._plantilla.nombre = new_name
+            self.set_status(f"Nombre de plantilla actualizado a: {new_name}", "success", toast=True)

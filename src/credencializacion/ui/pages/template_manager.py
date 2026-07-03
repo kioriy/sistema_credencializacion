@@ -464,7 +464,7 @@ class TemplateManager(QWidget):
 
             nueva = Plantilla(
                 cliente_id=dest_id,
-                nombre=f"{original.nombre} (copia)",
+                nombre=original.nombre,
                 tipo=original.tipo,
                 orientacion=original.orientacion,
                 ancho=original.ancho,

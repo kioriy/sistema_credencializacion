@@ -176,6 +176,9 @@ class ControlPanel(QWidget):
         self._render_worker = None
         self._render_on_done = None
         self._mark_workers = []
+        
+        # Cargar datos locales al iniciar
+        self._load_clients_combo()
 
     # ── Construcción de UI ─────────────────────────────────────────
 
