@@ -658,10 +658,9 @@ class PDFEngine:
         
         # Draw white background if requested
         if props.get("qr_white_bg", False):
-            pad = 4.0  # Approx 1.4 mm
             canvas.saveState()
             canvas.setFillColorRGB(1, 1, 1)
-            canvas.rect(tx - pad, ty - pad, (qr_w * scale) + (pad * 2), (qr_h * scale) + (pad * 2), stroke=0, fill=1)
+            canvas.rect(tx, ty, qr_w * scale, qr_h * scale, stroke=0, fill=1)
             canvas.restoreState()
 
         d = Drawing(w, h, transform=[scale, 0, 0, scale, tx, ty])

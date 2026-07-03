@@ -243,10 +243,9 @@ class GraphicElement(QGraphicsItem):
         if props.get("qr_white_bg", False) and self._data.get("type") == "qr":
             painter.setBrush(QColor("#FFFFFF"))
             sz = min(self._rect.width(), self._rect.height())
-            pad = 4.0
             cx = self._rect.x() + self._rect.width() / 2.0
             cy = self._rect.y() + self._rect.height() / 2.0
-            painter.drawRect(QRectF(cx - sz/2 - pad, cy - sz/2 - pad, sz + pad*2, sz + pad*2))
+            painter.drawRect(QRectF(cx - sz/2, cy - sz/2, sz, sz))
         else:
             painter.setBrush(QColor("#F1F5F9"))
             if is_circular:
