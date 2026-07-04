@@ -275,6 +275,15 @@ class MainWindow(QMainWindow):
             self._print_center.refresh_queues
         )
 
+        # Plantilla renombrada en el editor → refrescar combo de plantillas
+        # del Panel de Control y la lista de colas del Centro de Impresión
+        self._template_editor.template_renamed.connect(
+            self._control_panel.reload_templates
+        )
+        self._template_editor.template_renamed.connect(
+            lambda: self._print_center.refresh_queues(keep_selection=True)
+        )
+
         # 4 — Configuración
         tb_config = self._make_toolbar_frame()
         tb_config_layout = tb_config.layout()

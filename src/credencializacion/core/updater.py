@@ -112,32 +112,77 @@ def is_newer(remote_tag: str) -> bool:
 
 
 # ── Descarga e instalación ────────────────────────────────────────────────────
-def download_update(asset_url: str, dest: Path, progress_cb=None) -> bool:
-    """Descarga el zip de actualización con progreso.
+def download_update(
+    asset_url: str,
+    dest: Path,
+    progress_cb=None,
+    status_cb=None,
+    attempts: int = 3,
+) -> bool:
+    """Descarga el zip de actualización con progreso, reintentos y verificación.
+
+    Tras descargar se verifica la integridad (tamaño esperado + zip válido con
+    ``testzip``); un archivo truncado o corrupto cuenta como fallo y se
+    reintenta. Así nunca se aplica una actualización a partir de una descarga
+    incompleta.
 
     Args:
         asset_url: URL de descarga del asset de GitHub.
         dest: Ruta donde guardar el zip.
         progress_cb: Callback(bytes_descargados, total_bytes) opcional.
+        status_cb: Callback(mensaje) opcional para avisos de reintento.
+        attempts: Número máximo de intentos de descarga.
 
     Returns:
-        True si la descarga fue exitosa.
+        True si la descarga fue exitosa y el zip es íntegro.
     """
-    try:
-        with requests.get(asset_url, stream=True, timeout=60) as resp:
-            resp.raise_for_status()
-            total = int(resp.headers.get("content-length", 0))
-            downloaded = 0
-            with open(dest, "wb") as f:
-                for chunk in resp.iter_content(chunk_size=8192):
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    if progress_cb:
-                        progress_cb(downloaded, total)
-        return True
-    except Exception as e:
-        logger.error("Error al descargar actualización: %s", e)
-        return False
+    import time
+
+    last_error: Exception | None = None
+    for intento in range(1, attempts + 1):
+        try:
+            if status_cb and intento > 1:
+                status_cb(f"Reintentando descarga… (intento {intento} de {attempts})")
+            with requests.get(asset_url, stream=True, timeout=(10, 30)) as resp:
+                resp.raise_for_status()
+                total = int(resp.headers.get("content-length", 0))
+                downloaded = 0
+                with open(dest, "wb") as f:
+                    for chunk in resp.iter_content(chunk_size=65536):
+                        if not chunk:
+                            continue
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if progress_cb:
+                            progress_cb(downloaded, total)
+
+            # Verificación de integridad antes de dar la descarga por buena.
+            if total and downloaded != total:
+                raise IOError(
+                    f"descarga incompleta ({downloaded} de {total} bytes)"
+                )
+            if not zipfile.is_zipfile(dest):
+                raise IOError("el archivo descargado no es un zip válido")
+            with zipfile.ZipFile(dest) as zf:
+                corrupto = zf.testzip()
+                if corrupto is not None:
+                    raise IOError(f"zip corrupto (archivo dañado: {corrupto})")
+
+            return True
+        except Exception as e:  # noqa: BLE001
+            last_error = e
+            logger.warning(
+                "Descarga de actualización fallida (intento %d/%d): %s",
+                intento, attempts, e,
+            )
+            dest.unlink(missing_ok=True)
+            if intento < attempts:
+                time.sleep(2 * intento)
+
+    logger.error(
+        "Error al descargar actualización tras %d intentos: %s", attempts, last_error
+    )
+    return False
 
 
 def can_self_update() -> bool:
@@ -376,13 +421,33 @@ def _show_update_dialog(version: str, asset_url: str, release_url: str, parent) 
     """Muestra el diálogo de actualización disponible (en el hilo principal)."""
     from PySide6.QtWidgets import (
         QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-        QProgressBar, QApplication,
+        QProgressBar,
     )
     from PySide6.QtCore import Qt, QUrl
     from PySide6.QtGui import QFont, QDesktopServices
     import tempfile
 
-    dialog = QDialog(parent)
+    class _UpdateDialog(QDialog):
+        """Diálogo que no puede cerrarse mientras la descarga está en curso.
+
+        Cerrarlo a media descarga dejaba al hilo actualizando widgets ya
+        destruidos; con esta guarda el cierre (X o Esc) se ignora hasta que
+        la descarga termina o falla.
+        """
+
+        downloading = False
+
+        def reject(self) -> None:  # Esc y botón cancelar
+            if not self.downloading:
+                super().reject()
+
+        def closeEvent(self, event) -> None:  # botón X
+            if self.downloading:
+                event.ignore()
+            else:
+                super().closeEvent(event)
+
+    dialog = _UpdateDialog(parent)
     dialog.setWindowTitle("Actualización disponible")
     dialog.setFixedWidth(420)
     dialog.setWindowFlags(dialog.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint)
@@ -444,27 +509,73 @@ def _show_update_dialog(version: str, asset_url: str, release_url: str, parent) 
         QDesktopServices.openUrl(QUrl(release_url or asset_url))
         dialog.accept()
 
+    # Puente de señales del hilo de descarga hacia el hilo de la UI. Tocar los
+    # widgets directamente desde el hilo de descarga corrompía el estado de Qt
+    # y cerraba la app a media descarga (la causa del "a veces funciona").
+    # Con señales, Qt encola las actualizaciones en el hilo principal.
+    class _DownloadSignals(QObject):
+        progress = Signal(int, int)  # bytes descargados, total
+        status = Signal(str)
+        failed = Signal(str)
+
+    signals = _DownloadSignals(dialog)
+
+    def _on_progress(done: int, total: int) -> None:
+        if total:
+            progress.setRange(0, 100)
+            progress.setValue(int(done * 100 / total))
+            lbl_status.setText(
+                f"Descargando… {done / 1_048_576:.1f} / {total / 1_048_576:.1f} MB"
+            )
+        else:
+            # El servidor no informó tamaño: barra indeterminada.
+            progress.setRange(0, 0)
+            lbl_status.setText(f"Descargando… {done / 1_048_576:.1f} MB")
+
+    def _on_status(text: str) -> None:
+        lbl_status.setText(text)
+
+    def _on_failed(text: str) -> None:
+        dialog.downloading = False
+        progress.setRange(0, 100)
+        progress.setVisible(False)
+        lbl_status.setText(text)
+        btn_primary.setText("↻  Reintentar")
+        btn_primary.setEnabled(True)
+        btn_cancel.setEnabled(True)
+
+    signals.progress.connect(_on_progress)
+    signals.status.connect(_on_status)
+    signals.failed.connect(_on_failed)
+
     def on_update():
+        dialog.downloading = True
         btn_primary.setEnabled(False)
         btn_cancel.setEnabled(False)
+        progress.setRange(0, 100)
+        progress.setValue(0)
         progress.setVisible(True)
         lbl_status.setVisible(True)
         lbl_status.setText("Descargando actualización…")
 
         tmp = Path(tempfile.mkdtemp()) / ASSET_NAME
 
-        def _progress(done, total):
-            if total:
-                pct = int(done * 100 / total)
-                progress.setValue(pct)
-                mb_done = done / 1_048_576
-                mb_total = total / 1_048_576
-                lbl_status.setText(f"Descargando… {mb_done:.1f} / {mb_total:.1f} MB")
-
         def _download():
-            ok = download_update(asset_url, tmp, _progress)
-            if ok:
-                lbl_status.setText("Aplicando actualización…")
+            try:
+                ok = download_update(
+                    asset_url,
+                    tmp,
+                    progress_cb=signals.progress.emit,
+                    status_cb=signals.status.emit,
+                )
+                if not ok:
+                    signals.failed.emit(
+                        "❌ No se pudo completar la descarga tras varios intentos. "
+                        "Verifica tu conexión y reintenta."
+                    )
+                    return
+
+                signals.status.emit("Aplicando actualización…")
                 # Registrar el intento ANTES de aplicar: si el relanzamiento no
                 # completa la actualización, el arranque siguiente no volverá a
                 # abrir el diálogo automáticamente (evita el bucle).
@@ -473,13 +584,12 @@ def _show_update_dialog(version: str, asset_url: str, release_url: str, parent) 
                     if _bridge is not None:
                         _bridge.quit_requested.emit()
                     else:
-                        QApplication.quit()
+                        signals.failed.emit("❌ No se pudo reiniciar la aplicación.")
                 else:
-                    lbl_status.setText("❌ No se pudo aplicar la actualización.")
-                    btn_cancel.setEnabled(True)
-            else:
-                lbl_status.setText("❌ Error al descargar. Intenta de nuevo más tarde.")
-                btn_cancel.setEnabled(True)
+                    signals.failed.emit("❌ No se pudo aplicar la actualización.")
+            except Exception as e:  # noqa: BLE001
+                logger.error("Fallo inesperado durante la actualización: %s", e)
+                signals.failed.emit(f"❌ Error inesperado: {e}")
 
         Thread(target=_download, daemon=True).start()
 

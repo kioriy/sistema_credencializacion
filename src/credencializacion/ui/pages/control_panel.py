@@ -1295,6 +1295,34 @@ class ControlPanel(QWidget):
                 "info",
             )
 
+    def reload_templates(self) -> None:
+        """Recarga el combo de plantillas del cliente activo (p. ej. tras
+        renombrar una plantilla en el editor), conservando la selección."""
+        idx = self._combo_clients.currentIndex()
+        if idx < 0:
+            return
+        school_id = self._combo_clients.itemData(idx)
+        if school_id is None:
+            return
+
+        from credencializacion.db.engine import get_session
+        from credencializacion.db.models import Cliente
+
+        with get_session() as session:
+            cliente = session.query(Cliente).filter_by(
+                school_api_id=school_id
+            ).first()
+            if cliente is None:
+                return
+            cliente_id = cliente.id
+
+        selected_tpl = self._combo_templates.currentData()
+        self._load_client_templates(cliente_id)
+        if selected_tpl is not None:
+            i = self._combo_templates.findData(selected_tpl)
+            if i >= 0:
+                self._combo_templates.setCurrentIndex(i)
+
     def set_status(self, message: str, level: str = "info", toast: bool = True) -> None:
         """Actualiza el footer de estado con un mensaje y, opcionalmente, muestra un toast.
 

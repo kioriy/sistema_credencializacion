@@ -283,13 +283,19 @@ class CanvasToolbar(QWidget):
 
     def _on_template_name_finished(self) -> None:
         new_name = self._edit_template_name.text().strip()
-        if new_name:
-            self.template_name_changed.emit(new_name)
-        else:
-            # Revert to old name if empty (will be handled by TemplateEditor restoring it, or we can just not emit)
-            pass
+        current = getattr(self, "_current_name", "")
+        if not new_name:
+            # Vacío: revertir al nombre vigente sin emitir nada.
+            self._edit_template_name.setText(current)
+            self._edit_template_name.setCursorPosition(0)
+            return
+        if new_name == current:
+            # Sin cambio real (editingFinished también dispara al perder foco).
+            return
+        self.template_name_changed.emit(new_name)
 
     def set_template_name(self, name: str) -> None:
+        self._current_name = name
         self._edit_template_name.setText(name)
         self._edit_template_name.setCursorPosition(0)
 
@@ -1058,6 +1064,7 @@ class TemplateEditor(QWidget):
 
     template_saved = Signal()
     preview_requested = Signal()
+    template_renamed = Signal()  # nombre persistido: refrescar las demás vistas
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -2470,7 +2477,63 @@ class TemplateEditor(QWidget):
         return False
 
     def _on_template_name_changed(self, new_name: str) -> None:
-        """Actualiza el nombre de la plantilla actual."""
-        if self._plantilla:
-            self._plantilla.nombre = new_name
-            self.set_status(f"Nombre de plantilla actualizado a: {new_name}", "success", toast=True)
+        """Renombra la plantilla actual y lo persiste en la base de datos.
+
+        También renombra las colas de impresión creadas con esta plantilla
+        (llevan el nombre como prefijo en su título) y emite
+        ``template_renamed`` para que las demás vistas se refresquen.
+        """
+        if not self._plantilla:
+            self.set_status(
+                "⚠️ Guarda la plantilla antes de renombrarla", "warning", toast=True
+            )
+            self._canvas_toolbar.set_template_name("")
+            return
+
+        old_name = self._plantilla.nombre or ""
+        if new_name == old_name:
+            return
+
+        from credencializacion.db.engine import get_session
+        from credencializacion.db.models import ColaImpresion, ItemCola, Plantilla
+
+        try:
+            with get_session() as session:
+                plantilla_db = session.query(Plantilla).get(self._plantilla.id)
+                if plantilla_db is None:
+                    self.set_status(
+                        "❌ La plantilla ya no existe en la base de datos",
+                        "error",
+                        toast=True,
+                    )
+                    self._canvas_toolbar.set_template_name(old_name)
+                    return
+                plantilla_db.nombre = new_name
+
+                # Renombrar las colas creadas con esta plantilla cuyo título
+                # conserva el nombre anterior ("<plantilla> — N registros").
+                if old_name:
+                    colas = (
+                        session.query(ColaImpresion)
+                        .join(ItemCola, ItemCola.cola_id == ColaImpresion.id)
+                        .filter(ItemCola.plantilla_id == plantilla_db.id)
+                        .distinct()
+                        .all()
+                    )
+                    for cola in colas:
+                        if old_name in (cola.nombre or ""):
+                            cola.nombre = cola.nombre.replace(old_name, new_name, 1)
+
+                session.commit()
+        except Exception as e:  # noqa: BLE001
+            self.set_status(
+                f"❌ No se pudo renombrar la plantilla: {e}", "error", toast=True
+            )
+            self._canvas_toolbar.set_template_name(old_name)
+            return
+
+        self._plantilla.nombre = new_name
+        # Sincronizar el nombre vigente del toolbar (para futuros renombrados)
+        self._canvas_toolbar.set_template_name(new_name)
+        self.set_status(f"✏️ Plantilla renombrada a «{new_name}»", "success", toast=True)
+        self.template_renamed.emit()
