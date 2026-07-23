@@ -567,6 +567,34 @@ class PrintCenter(QWidget):
         self._selected_cola_id = cola_id
         self._load_queue_detail(cola_id)
 
+    @staticmethod
+    def _escuelas_por_cola(session, cola_ids: list[int]) -> dict[int, str]:
+        """Mapa ``cola_id -> nombre de la escuela`` (cliente) de cada cola.
+
+        La cola no guarda la escuela; se resuelve a través de la plantilla de
+        sus ítems (``ItemCola -> Plantilla -> Cliente``). Una cola usa una sola
+        plantilla, así que basta el primer ítem; se toma el primero por cola.
+        Las colas vacías o cuya plantilla/cliente ya no existan quedan fuera
+        del mapa (el llamador usa un texto de respaldo).
+        """
+        from credencializacion.db.models import ItemCola, Plantilla, Cliente
+
+        if not cola_ids:
+            return {}
+
+        filas = (
+            session.query(ItemCola.cola_id, Cliente.nombre)
+            .join(Plantilla, ItemCola.plantilla_id == Plantilla.id)
+            .join(Cliente, Plantilla.cliente_id == Cliente.id)
+            .filter(ItemCola.cola_id.in_(cola_ids))
+            .order_by(ItemCola.cola_id, ItemCola.orden)
+            .all()
+        )
+        escuelas: dict[int, str] = {}
+        for cid, nombre in filas:
+            escuelas.setdefault(cid, nombre)
+        return escuelas
+
     def _load_queue_detail(self, cola_id: int) -> None:
         """Carga los detalles de una cola en el panel derecho."""
         from credencializacion.db.engine import DatabaseSession
@@ -578,11 +606,15 @@ class PrintCenter(QWidget):
                 if not cola:
                     return
 
+                escuela = self._escuelas_por_cola(session, [cola_id]).get(
+                    cola_id, "Escuela desconocida"
+                )
                 self._detail_header.setText(f"📋 {cola.nombre}")
                 estado = cola.estado_label
                 fecha = cola.created_at.strftime("%d/%m/%Y %H:%M") if cola.created_at else ""
                 self._detail_info.setText(
-                    f"Estado: {estado}  •  Registros: {cola.total_registros}  •  Creada: {fecha}"
+                    f"🏫 {escuela}  •  Estado: {estado}  •  "
+                    f"Registros: {cola.total_registros}  •  Creada: {fecha}"
                 )
 
                 # Cargar ítems
@@ -963,6 +995,7 @@ class PrintCenter(QWidget):
         )
         self._render_worker.finished_ok.connect(self._on_render_ok)
         self._render_worker.failed.connect(self._on_render_failed)
+        self._render_worker.omitidos.connect(self._on_render_omitidos)
         self._render_worker.finished.connect(self._cleanup_render_worker)
         self._set_render_buttons_enabled(False)
         self._render_worker.start()
@@ -974,6 +1007,31 @@ class PrintCenter(QWidget):
 
     def _on_render_failed(self, message: str) -> None:
         self.set_status(f"❌ Error al generar PDFs: {message}", "error")
+
+    def _on_render_omitidos(self, reporte: dict) -> None:
+        """Informa qué registros quedaron fuera de los PDFs y por qué."""
+        sin_req = reporte.get("sin_requeridos") or []
+        colapsados = reporte.get("hermanos_colapsados") or []
+
+        if sin_req:
+            detalle = "; ".join(
+                f"{nombre} (falta: {', '.join(attrs)})" for nombre, attrs in sin_req[:5]
+            )
+            if len(sin_req) > 5:
+                detalle += f" y {len(sin_req) - 5} más"
+            self.set_status(
+                f"⚠️ {len(sin_req)} registro(s) sin credencial por atributos "
+                f"requeridos faltantes: {detalle}",
+                "warning",
+            )
+
+        if colapsados:
+            self.set_status(
+                f"ℹ️ {len(colapsados)} hermano(s) omitido(s): ya se incluyen en la "
+                f"credencial de su familia ({', '.join(colapsados[:5])}"
+                f"{' y más' if len(colapsados) > 5 else ''}).",
+                "info",
+            )
 
     def _cleanup_render_worker(self) -> None:
         self._render_worker = None
@@ -1194,11 +1252,13 @@ class PrintCenter(QWidget):
                 self._card_complete.set_value(complete)
                 self._card_registros.set_value(total_regs)
 
+                escuelas = self._escuelas_por_cola(session, [c.id for c in colas])
+
                 for cola in colas:
                     item = QListWidgetItem()
                     item.setData(Qt.ItemDataRole.UserRole, cola.id)
 
-                    # Formato: ícono estado + nombre + conteo
+                    # Formato: ícono estado + nombre + escuela + conteo
                     estado_icons = {
                         "pendiente": "⏳",
                         "frentes_impresos": "📄",
@@ -1208,8 +1268,13 @@ class PrintCenter(QWidget):
                     }
                     icon = estado_icons.get(cola.estado, "❓")
                     fecha = cola.created_at.strftime("%d/%m %H:%M") if cola.created_at else ""
-                    item.setText(f"{icon} {cola.nombre}\n      {fecha} · {cola.total_registros} reg.")
-                    item.setSizeHint(QSize(0, 52))
+                    escuela = escuelas.get(cola.id, "Escuela desconocida")
+                    item.setText(
+                        f"{icon} {cola.nombre}\n"
+                        f"      🏫 {escuela}\n"
+                        f"      {fecha} · {cola.total_registros} reg."
+                    )
+                    item.setSizeHint(QSize(0, 68))
 
                     self._queue_list.addItem(item)
                     if selected_id is not None and cola.id == selected_id:

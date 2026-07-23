@@ -94,6 +94,12 @@ class CanvasToolbar(QWidget):
     DEFAULT_ATTRIBUTES = [
         ("composite",  "📝",  "Texto Compuesto",    "composite"),
         ("photo_path", "🖼",  "Imagen",              "photo_url"),
+        # Fotos de hermanos: se resuelven al imprimir por `tutor_email`.
+        # Pensados para credenciales de autorizados, que muestran a todos
+        # los alumnos que esa persona puede recoger.
+        ("photo_path", "👨‍👩‍👦", "Foto Hermano 2",     "photo_url_hermano_2"),
+        ("photo_path", "👨‍👩‍👦", "Foto Hermano 3",     "photo_url_hermano_3"),
+        ("photo_path", "👨‍👩‍👦", "Foto Hermano 4",     "photo_url_hermano_4"),
         ("text",       "👤",  "Nombre",              "nombre"),
         ("text",       "👤",  "Apellidos",           "apellido"),
         ("text",       "🏢",  "Escuela",             "escuela"),
@@ -182,6 +188,22 @@ class CanvasToolbar(QWidget):
         self._banner_sync.setWordWrap(True)
         self._banner_sync.setVisible(False)
         h_lay.addWidget(self._banner_sync)
+
+        # Banner "sin atributos" (cliente sincronizado, pero su pestaña/fuente
+        # no define columnas dinámicas — ej. un negocio de Google Sheets que
+        # solo usa la plantilla base, sin datos variables por registro).
+        self._banner_no_attrs = QLabel("ℹ Sin atributos\nSolo usa la plantilla base")
+        self._banner_no_attrs.setStyleSheet("""
+            background-color: #EFF6FF;
+            border: 1px solid #2563EB;
+            border-radius: 6px;
+            padding: 6px 8px;
+            font-size: 11px;
+            color: #1E3A8A;
+        """)
+        self._banner_no_attrs.setWordWrap(True)
+        self._banner_no_attrs.setVisible(False)
+        h_lay.addWidget(self._banner_no_attrs)
 
         outer.addWidget(header)
 
@@ -299,21 +321,42 @@ class CanvasToolbar(QWidget):
         self._edit_template_name.setText(name)
         self._edit_template_name.setCursorPosition(0)
 
-    def set_client_label(self, nombre: str, last_sync: str, *, sync_needed: bool = False) -> None:
-        """Actualiza la etiqueta del cliente activo y el banner de sync."""
+    def set_client_label(
+        self,
+        nombre: str,
+        last_sync: str,
+        *,
+        sync_needed: bool = False,
+        no_attributes: bool = False,
+    ) -> None:
+        """Actualiza la etiqueta del cliente activo y su banner informativo.
+
+        Tres estados posibles:
+        - ``sync_needed``: el cliente nunca se ha sincronizado — catálogo
+          fijo de respaldo, banner de advertencia pidiendo sincronizar.
+        - ``no_attributes``: el cliente SÍ está sincronizado, pero su fuente
+          no define columnas dinámicas (ej. una pestaña de Google Sheets sin
+          encabezados aún) — solo usa la plantilla base. Distinto de "nunca
+          sincronizado": aquí no hace falta sincronizar, es su estado real.
+        - Ninguno de los dos: cliente con atributos reales cargados.
+        """
+        self._lbl_client.setText(f"🏫 {nombre}")
         if sync_needed:
-            self._lbl_client.setText(f"🏫 {nombre}")
             self._banner_sync.setVisible(True)
-        else:
-            from datetime import datetime
-            try:
-                dt = datetime.fromisoformat(last_sync)
-                sync_str = dt.strftime("%d/%m %H:%M")
-            except Exception:
-                sync_str = last_sync[:16] if last_sync else "?"
-            self._lbl_client.setText(f"🏫 {nombre}")
-            self._banner_sync.setVisible(False)
-            self._lbl_client.setToolTip(f"Última sync: {sync_str}")
+            self._banner_no_attrs.setVisible(False)
+            self._lbl_client.setToolTip("")
+            return
+
+        self._banner_sync.setVisible(False)
+        self._banner_no_attrs.setVisible(no_attributes)
+
+        from datetime import datetime
+        try:
+            dt = datetime.fromisoformat(last_sync)
+            sync_str = dt.strftime("%d/%m %H:%M")
+        except Exception:
+            sync_str = last_sync[:16] if last_sync else "?"
+        self._lbl_client.setToolTip(f"Última sync: {sync_str}")
 
     def load_attributes(self, attributes: list[str]) -> None:
         """Reemplaza los atributos dinámicamente (llamado desde TemplateEditor al cargar plantilla)."""
@@ -624,6 +667,20 @@ class PropertiesPanel(QWidget):
         )
         self._row_circle_radius = self._f_dyn.addRow("Radio:", self._spin_circle_radius)
 
+        # ── Requerido para impresión ──────────────────────────────────────
+        # Si el registro no aporta el dato de este elemento, su credencial no
+        # se genera (y tampoco su vuelta, para no desalinear la hoja).
+        self._chk_required = QCheckBox("Requerido para impresión")
+        self._chk_required.setStyleSheet(f"color: {TEXT_DARK}; font-size: 12px;")
+        self._chk_required.setToolTip(
+            "Si el registro no tiene este dato, no se genera su credencial:\n"
+            "la cola continúa con el siguiente registro que sí lo cumpla."
+        )
+        self._chk_required.toggled.connect(
+            lambda c: self.property_changed.emit("required_for_print", c)
+        )
+        self._row_required = self._f_dyn.addRow("", self._chk_required)
+
         self._form.addRow(self._w_dynamic_group)
 
         layout.addWidget(self._props_container)
@@ -738,6 +795,9 @@ class PropertiesPanel(QWidget):
         # Ocultar paneles específicos primero
         self._w_dynamic_group.setVisible(False)
         self._f_dyn.setRowVisible(self._combo_barcode_format, False)
+        # El fondo blanco solo aplica al QR: sin este reset se quedaba visible
+        # al pasar de un QR a otro tipo de elemento.
+        self._f_dyn.setRowVisible(self._chk_qr_bg, False)
         self._f_dyn.setRowVisible(self._edit_test_text, False)
         self._f_dyn.setRowVisible(self._edit_composite, False)
         self._f_dyn.setRowVisible(self._combo_align, False)
@@ -748,17 +808,28 @@ class PropertiesPanel(QWidget):
         self._f_dyn.setRowVisible(self._chk_circular, False)
         self._f_dyn.setRowVisible(self._spin_circle_radius, False)
         self._f_dyn.setRowVisible(self._combo_text_rule, False)
+        # "Requerido para impresión" solo aplica a elementos que dependen de
+        # los datos del registro; formas y fondos no dependen de él.
+        depende_de_datos = elem_type in (
+            "text", "composite", "image", "photo_path", "qr", "barcode"
+        )
+        self._f_dyn.setRowVisible(self._chk_required, depende_de_datos)
         # Por defecto, mostrar las filas de fuente (se ocultan solo en imagen).
         for _w in (self._combo_font, self._spin_font_size, self._chk_bold, self._btn_color):
             self._form.setRowVisible(_w, True)
 
         # Bloquear señales
-        for widget in (self._spin_x, self._spin_y, self._spin_w, self._spin_h, 
+        for widget in (self._spin_x, self._spin_y, self._spin_w, self._spin_h,
                        self._combo_font, self._spin_font_size, self._chk_bold,
                        self._combo_render_as, self._chk_qr_bg,
                        self._combo_barcode_format, self._edit_test_text, self._edit_composite,
-                       self._combo_align, self._chk_circular, self._spin_circle_radius):
+                       self._combo_align, self._chk_circular, self._spin_circle_radius,
+                       self._chk_required):
             widget.blockSignals(True)
+
+        if depende_de_datos:
+            self._w_dynamic_group.setVisible(True)
+            self._chk_required.setChecked(props.get("required_for_print", False))
 
         self._spin_x.setValue(element.get("x", 0))
         self._spin_y.setValue(element.get("y", 0))
@@ -857,11 +928,12 @@ class PropertiesPanel(QWidget):
             self._spin_circle_radius.blockSignals(False)
             self._f_dyn.setRowVisible(self._spin_circle_radius, is_circ)
 
-        for widget in (self._spin_x, self._spin_y, self._spin_w, self._spin_h, 
+        for widget in (self._spin_x, self._spin_y, self._spin_w, self._spin_h,
                        self._combo_font, self._spin_font_size, self._chk_bold,
                        self._combo_render_as, self._chk_qr_bg,
                        self._combo_barcode_format, self._edit_test_text, self._edit_composite,
-                       self._combo_align, self._chk_circular, self._spin_circle_radius):
+                       self._combo_align, self._chk_circular, self._spin_circle_radius,
+                       self._chk_required):
             widget.blockSignals(False)
 
     def _on_circular_toggled(self, checked: bool) -> None:
@@ -878,13 +950,26 @@ class PropertiesPanel(QWidget):
         pass
 
     def set_image_attributes(self, attributes: list[str]) -> None:
-        """Puebla el combobox de atributos de imagen (origen 'Atributo')."""
+        """Puebla el combobox de atributos de imagen (origen 'Atributo').
+
+        Además de los atributos de imagen del cliente, se ofrecen siempre los
+        slots de foto de hermanos: no vienen en los datos del registro, se
+        resuelven al imprimir buscando a los alumnos que comparten
+        ``tutor_email``.
+        """
+        from credencializacion.services.print_rules import (
+            SIBLING_PHOTO_ATTRS, SIBLING_PHOTO_LABELS,
+        )
+
         self._img_attributes = list(attributes or [])
         self._combo_img_attr.blockSignals(True)
         self._combo_img_attr.clear()
         self._combo_img_attr.addItem("Selecciona un atributo…", "")
         for attr in self._img_attributes:
             self._combo_img_attr.addItem(attr, attr)
+        for attr in SIBLING_PHOTO_ATTRS:
+            if attr not in self._img_attributes:
+                self._combo_img_attr.addItem(f"👨‍👩‍👦 {SIBLING_PHOTO_LABELS[attr]}", attr)
         self._combo_img_attr.blockSignals(False)
 
     def _on_img_source_changed(self, text: str) -> None:
@@ -1544,8 +1629,15 @@ class TemplateEditor(QWidget):
     def _load_client_attributes(self, cliente_id: int) -> None:
         """Carga los atributos conocidos del cliente en el toolbar.
 
-        Si el cliente ya fue sincronizado, usa sus `known_attributes`.
-        Si no, usa el catálogo fijo como fallback y muestra un banner.
+        Tres estados posibles, según ``cliente.config``:
+        - Nunca sincronizado (sin ``last_sync``): catálogo fijo como
+          fallback y banner pidiendo sincronizar.
+        - Sincronizado con atributos reales (``known_attributes`` no
+          vacío): esos atributos alimentan el toolbar.
+        - Sincronizado sin atributos (``known_attributes == []`` pero SÍ
+          hay ``last_sync``): ej. una pestaña de Google Sheets sin columnas
+          aún — el cliente solo usa la plantilla base. Se distingue del
+          caso anterior con un banner propio en vez del de "sincroniza".
         """
         from credencializacion.db.engine import get_session
         from credencializacion.db.models import Cliente
@@ -1568,10 +1660,17 @@ class TemplateEditor(QWidget):
             # Atributos reales del cliente — actualizar el toolbar
             self._canvas_toolbar.load_attributes(known_attrs)
             self._properties_panel.set_available_attributes(known_attrs)
-            # Actualizar título del toolbar para indicar el cliente activo
             self._canvas_toolbar.set_client_label(nombre_cliente, last_sync)
+        elif last_sync:
+            # Sincronizado, pero sin atributos dinámicos por ahora — la
+            # etiqueta debe reflejar ese estado real, no pedir sincronizar.
+            self._canvas_toolbar.load_attributes([])
+            self._properties_panel.set_available_attributes([])
+            self._canvas_toolbar.set_client_label(
+                nombre_cliente, last_sync, no_attributes=True
+            )
         else:
-            # Sin sincronización aún — catálogo fijo como fallback
+            # Nunca sincronizado — catálogo fijo como fallback
             self._canvas_toolbar.set_client_label(
                 nombre_cliente, "", sync_needed=True
             )

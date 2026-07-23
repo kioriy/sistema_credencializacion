@@ -340,21 +340,42 @@ class MiEscuelaAdapter(DataAdapter):
             )
             record[f"autorizado_{i}_email"] = email
 
-        # Correo del tutor principal (vínculo): el del autorizado is_primary con
-        # correo; si ninguno, el primero con correo disponible.
-        tutor_email = ""
+        # Correo del tutor principal (vínculo de familia). El endpoint lo
+        # entrega en el nivel superior del alumno (`tutor_email`); si no
+        # viniera, se busca dentro de los autorizados: el del `is_primary`
+        # con correo y, si ninguno lo tiene, el primero disponible.
+        tutor_email = str(raw.get("tutor_email", "") or "").strip()
+        if not tutor_email:
+            for persona in authorized:
+                if not isinstance(persona, dict):
+                    continue
+                mail = persona.get("email") or persona.get("correo") or persona.get("mail") or ""
+                if not mail:
+                    continue
+                if persona.get("is_primary"):
+                    tutor_email = mail
+                    break
+                if not tutor_email:
+                    tutor_email = mail
+        record["tutor_email"] = tutor_email
+
+        # Teléfono del tutor principal: vínculo de familia de respaldo cuando
+        # el endpoint no expone el correo. Hoy `authorized_persons` solo trae
+        # full_name / phone / relationship / is_primary / photo_url, así que
+        # este es el único identificador de tutor disponible en la práctica.
+        tutor_phone = ""
         for persona in authorized:
             if not isinstance(persona, dict):
                 continue
-            mail = persona.get("email") or persona.get("correo") or persona.get("mail") or ""
-            if not mail:
+            tel = str(persona.get("phone", "") or "").strip()
+            if not tel:
                 continue
             if persona.get("is_primary"):
-                tutor_email = mail
+                tutor_phone = tel
                 break
-            if not tutor_email:
-                tutor_email = mail
-        record["tutor_email"] = tutor_email
+            if not tutor_phone:
+                tutor_phone = tel
+        record["tutor_phone"] = tutor_phone
 
         # student_record: campos configurables por escuela (dinámicos). Se
         # aplanan las claves escalares sin sobrescribir atributos ya presentes.

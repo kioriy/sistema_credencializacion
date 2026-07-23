@@ -136,14 +136,33 @@ class Registro(Base):
 
     @property
     def nombre_completo(self) -> str:
-        """Nombre completo extraído del JSON de datos."""
+        """Nombre completo extraído del JSON de datos.
+
+        Prioriza el ``nombre_completo`` que ya viene armado desde el origen
+        (la API lo entrega así). Si no está, lo compone aceptando las
+        distintas formas en que cada origen nombra los apellidos: la API usa
+        ``apellido`` (un solo campo con ambos), mientras que las
+        importaciones de archivo suelen traer ``apellido_paterno`` y
+        ``apellido_materno`` por separado.
+        """
         d = self.datos or {}
-        parts = [
-            d.get("first_name") or d.get("nombre", ""),
-            d.get("last_name") or d.get("apellido_paterno", ""),
-            d.get("apellido_materno", ""),
-        ]
-        return " ".join(p for p in parts if p).strip()
+
+        directo = str(d.get("nombre_completo", "") or "").strip()
+        if directo:
+            return directo
+
+        nombre = str(d.get("first_name") or d.get("nombre", "") or "").strip()
+
+        apellidos = str(d.get("last_name") or d.get("apellido", "") or "").strip()
+        if not apellidos:
+            apellidos = " ".join(
+                p for p in (
+                    str(d.get("apellido_paterno", "") or "").strip(),
+                    str(d.get("apellido_materno", "") or "").strip(),
+                ) if p
+            )
+
+        return " ".join(p for p in (nombre, apellidos) if p).strip()
 
     @property
     def institucion(self) -> str:

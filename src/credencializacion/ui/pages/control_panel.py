@@ -216,7 +216,10 @@ class SyncWorker(QThread):
                     # eliminado en app.miescuela.net. Solo se llega aquí si la
                     # descarga tuvo datos (guard `if not raw_records` arriba),
                     # y todo ocurre en la misma transacción que el upsert.
-                    depurados, colas = self._purge_stale_records(
+                    from credencializacion.services.sync_registros import (
+                        purge_stale_records,
+                    )
+                    depurados, colas = purge_stale_records(
                         session, local_cliente_id, raw_records
                     )
                     total_depurados += depurados
@@ -254,68 +257,6 @@ class SyncWorker(QThread):
             import logging
             logging.getLogger(__name__).error("Error en sincronización API: %s", e)
             self.failed.emit(str(e))
-
-    @staticmethod
-    def _purge_stale_records(
-        session, cliente_id: int, raw_records: list[dict]
-    ) -> tuple[int, list[str]]:
-        """Elimina los registros locales que ya no existen en la plataforma.
-
-        Compara los ``enrollment_code`` del padrón descargado contra los
-        registros locales del cliente y borra los huérfanos. Los ítems de
-        colas de impresión que los referencien se eliminan en cascada
-        (FK ``ON DELETE CASCADE``); las colas afectadas ajustan su
-        ``total_registros`` y se devuelven para notificar al usuario.
-
-        Returns:
-            (número de registros depurados, nombres de colas afectadas)
-        """
-        from credencializacion.db.models import ColaImpresion, ItemCola, Registro
-
-        api_enrollments = {
-            rec.get("enrollment_code") or rec.get("matricula", "")
-            for rec in raw_records
-            if isinstance(rec, dict)
-        }
-        if not api_enrollments:
-            return 0, []
-
-        stale = (
-            session.query(Registro)
-            .filter(
-                Registro.cliente_id == cliente_id,
-                Registro.enrollment_code.isnot(None),
-                Registro.enrollment_code.notin_(api_enrollments),
-            )
-            .all()
-        )
-        if not stale:
-            return 0, []
-
-        stale_ids = [r.id for r in stale]
-
-        # Colas que referencian registros a depurar (antes de borrarlos)
-        colas_tocadas = (
-            session.query(ColaImpresion)
-            .join(ItemCola, ItemCola.cola_id == ColaImpresion.id)
-            .filter(ItemCola.registro_id.in_(stale_ids))
-            .distinct()
-            .all()
-        )
-
-        for reg in stale:
-            session.delete(reg)
-        session.flush()
-
-        # Ajustar el conteo de las colas tras la cascada de sus ítems
-        nombres_colas: list[str] = []
-        for cola in colas_tocadas:
-            cola.total_registros = (
-                session.query(ItemCola).filter_by(cola_id=cola.id).count()
-            )
-            nombres_colas.append(cola.nombre)
-
-        return len(stale_ids), nombres_colas
 
 
 class ControlPanel(QWidget):
@@ -666,17 +607,31 @@ class ControlPanel(QWidget):
             active_bg="#EA580C",
         ))
 
+        self._pill_siblings = QPushButton("👨‍👩‍👦 Hermanos: 0")
+        self._pill_siblings.setCheckable(True)
+        self._pill_siblings.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._pill_siblings.setToolTip(
+            "Alumnos que comparten el correo del tutor con al menos otro alumno."
+        )
+        self._pill_siblings.setStyleSheet(pill_base.format(
+            bg="#F5F3FF", fg="#7C3AED", border="#DDD6FE",
+            hover_border="#7C3AED", hover_bg="#EDE9FE",
+            active_bg="#7C3AED",
+        ))
+
         self._pill_all.clicked.connect(lambda: self._apply_status_filter(None))
         self._pill_with_photo.clicked.connect(lambda: self._apply_status_filter("con_foto"))
         self._pill_no_photo.clicked.connect(lambda: self._apply_status_filter("sin_foto"))
         self._pill_with_form.clicked.connect(lambda: self._apply_status_filter("con_formulario"))
         self._pill_no_form.clicked.connect(lambda: self._apply_status_filter("sin_formulario"))
+        self._pill_siblings.clicked.connect(lambda: self._apply_status_filter("hermanos"))
 
         row.addWidget(self._pill_all)
         row.addWidget(self._pill_with_photo)
         row.addWidget(self._pill_no_photo)
         row.addWidget(self._pill_with_form)
         row.addWidget(self._pill_no_form)
+        row.addWidget(self._pill_siblings)
         row.addStretch()
 
         return row
@@ -934,8 +889,37 @@ class ControlPanel(QWidget):
         )
         self._render_worker.finished_ok.connect(self._on_render_ok)
         self._render_worker.failed.connect(self._on_render_failed)
+        self._render_worker.omitidos.connect(self._on_render_omitidos)
         self._render_worker.finished.connect(self._cleanup_render_worker)
         self._render_worker.start()
+
+    @Slot(dict)
+    def _on_render_omitidos(self, reporte: dict) -> None:
+        """Informa qué registros quedaron fuera del PDF y por qué."""
+        sin_req = reporte.get("sin_requeridos") or []
+        colapsados = reporte.get("hermanos_colapsados") or []
+
+        if sin_req:
+            detalle = "; ".join(
+                f"{nombre} (falta: {', '.join(attrs)})" for nombre, attrs in sin_req[:5]
+            )
+            if len(sin_req) > 5:
+                detalle += f" y {len(sin_req) - 5} más"
+            self.set_status(
+                f"⚠️ {len(sin_req)} registro(s) sin credencial por atributos "
+                f"requeridos faltantes: {detalle}",
+                "warning",
+                toast=True,
+            )
+
+        if colapsados:
+            self.set_status(
+                f"ℹ️ {len(colapsados)} hermano(s) omitido(s): ya se incluyen en la "
+                f"credencial de su familia ({', '.join(colapsados[:5])}"
+                f"{' y más' if len(colapsados) > 5 else ''}).",
+                "info",
+                toast=True,
+            )
 
     @Slot(str, str)
     def _on_render_ok(self, frentes_pdf: str, vueltas_pdf: str) -> None:
@@ -1167,8 +1151,32 @@ class ControlPanel(QWidget):
         display = (reg.get_dato("credential_display_status", "") or "").strip()
         return display != "sin_formulario"
 
+    def _sibling_groups(self) -> dict[str, list]:
+        """Agrupa los registros cargados por familia (``tutor_email``).
+
+        Los registros sin correo de tutor quedan fuera: agruparlos por cadena
+        vacía convertiría a todos los alumnos sin tutor en una sola familia.
+        """
+        from credencializacion.services.print_rules import group_by_tutor
+
+        return group_by_tutor(getattr(self, "_all_records", []) or [])
+
+    def _has_siblings(self, reg: "Registro") -> bool:
+        """Indica si el alumno comparte tutor con al menos otro alumno."""
+        from credencializacion.services.print_rules import has_siblings
+
+        return has_siblings(reg, self._sibling_groups())
+
     def _status_filter_predicate(self, status: str):
         """Devuelve el predicado de filtrado para una pill de estado."""
+        if status == "hermanos":
+            # El agrupado se calcula una sola vez para todo el filtrado, no
+            # una vez por registro.
+            from credencializacion.services.print_rules import has_siblings
+
+            grupos = self._sibling_groups()
+            return lambda r: has_siblings(r, grupos)
+
         return {
             "con_foto": self._has_photo,
             "sin_foto": lambda r: not self._has_photo(r),
@@ -1185,6 +1193,7 @@ class ControlPanel(QWidget):
         self._pill_no_photo.setChecked(status == "sin_foto")
         self._pill_with_form.setChecked(status == "con_formulario")
         self._pill_no_form.setChecked(status == "sin_formulario")
+        self._pill_siblings.setChecked(status == "hermanos")
         self._apply_filters()
 
     def _apply_filters(self) -> None:
@@ -1222,10 +1231,19 @@ class ControlPanel(QWidget):
                 ]
             else:
                 def matches(rec: "Registro") -> bool:
+                    # Los apellidos se incluyen explícitamente además de
+                    # `nombre_completo`: según el origen de los datos vienen
+                    # en `apellido` (API) o separados en paterno/materno
+                    # (importación de archivo).
                     searchable = " ".join(
                         str(v) for v in [
                             rec.nombre_completo,
+                            rec.get_dato("nombre", ""),
+                            rec.get_dato("apellido", ""),
+                            rec.get_dato("apellido_paterno", ""),
+                            rec.get_dato("apellido_materno", ""),
                             rec.enrollment_code,
+                            rec.get_dato("matricula", ""),
                             rec.get_dato("grado", ""),
                             rec.get_dato("grupo", ""),
                             rec.get_dato("turno", ""),
@@ -1253,17 +1271,25 @@ class ControlPanel(QWidget):
             self._pill_no_photo.setText("📷 Sin foto: 0")
             self._pill_with_form.setText("📝 Con formulario: 0")
             self._pill_no_form.setText("📋 Sin formulario: 0")
+            self._pill_siblings.setText("👨‍👩‍👦 Hermanos: 0")
             return
+
+        from credencializacion.services.print_rules import has_siblings
 
         total = len(self._all_records)
         with_photo = sum(1 for r in self._all_records if self._has_photo(r))
         with_form = sum(1 for r in self._all_records if self._has_form(r))
+        # Mismo criterio que el filtro, para que el número de la pill siempre
+        # coincida con las filas que muestra la tabla.
+        grupos = self._sibling_groups()
+        with_siblings = sum(1 for r in self._all_records if has_siblings(r, grupos))
 
         self._pill_all.setText(f"📋 Todos: {total}")
         self._pill_with_photo.setText(f"📸 Con foto: {with_photo}")
         self._pill_no_photo.setText(f"📷 Sin foto: {total - with_photo}")
         self._pill_with_form.setText(f"📝 Con formulario: {with_form}")
         self._pill_no_form.setText(f"📋 Sin formulario: {total - with_form}")
+        self._pill_siblings.setText(f"👨‍👩‍👦 Hermanos: {with_siblings}")
 
     def _load_client_templates(self, cliente_id: int) -> None:
         """Carga las plantillas del cliente seleccionado en el combo de plantillas.
@@ -1301,20 +1327,24 @@ class ControlPanel(QWidget):
         idx = self._combo_clients.currentIndex()
         if idx < 0:
             return
-        school_id = self._combo_clients.itemData(idx)
-        if school_id is None:
+        item_data = self._combo_clients.itemData(idx)
+        if item_data is None:
             return
+        kind, value = item_data
 
-        from credencializacion.db.engine import get_session
-        from credencializacion.db.models import Cliente
+        if kind == "empresa":
+            cliente_id = value
+        else:
+            from credencializacion.db.engine import get_session
+            from credencializacion.db.models import Cliente
 
-        with get_session() as session:
-            cliente = session.query(Cliente).filter_by(
-                school_api_id=school_id
-            ).first()
-            if cliente is None:
-                return
-            cliente_id = cliente.id
+            with get_session() as session:
+                cliente = session.query(Cliente).filter_by(
+                    school_api_id=value
+                ).first()
+                if cliente is None:
+                    return
+                cliente_id = cliente.id
 
         selected_tpl = self._combo_templates.currentData()
         self._load_client_templates(cliente_id)
@@ -1425,10 +1455,95 @@ class ControlPanel(QWidget):
         self.set_status(f"❌ Error de sincronización: {error_msg}", "error", toast=True)
         self._sync_worker = None
 
+    def _on_sync_sheets(self) -> None:
+        """Sincroniza el documento de Google Sheets configurado (asíncrono).
+
+        Comparte el mismo guardián de "sincronización en curso" y el mismo
+        botón que la sincronización de la API miescuela.net: solo puede
+        haber una sincronización corriendo a la vez.
+        """
+        if getattr(self, "_sync_worker", None) is not None:
+            self.set_status("⏳ Ya hay una sincronización en curso...", "warning", toast=False)
+            return
+
+        from credencializacion.core.settings import AppSettings
+        from credencializacion.ui.sheets_sync_worker import SheetsSyncWorker
+
+        credentials_path = AppSettings.get_sheets_credentials_path()
+        document_name = AppSettings.get_sheets_document_name()
+        if not credentials_path:
+            self.set_status(
+                "⚠️ Configura las credenciales de Google en Configuración → "
+                "Sincronización con Google Sheets antes de sincronizar.",
+                "warning",
+                toast=True,
+            )
+            return
+
+        self._set_sync_enabled(False)
+        self.set_status(f"Iniciando sincronización de «{document_name}»...", "info", toast=False)
+
+        self._sync_worker = SheetsSyncWorker(credentials_path, document_name)
+        self._sync_worker.progress.connect(self.set_status)
+        self._sync_worker.finished_ok.connect(self._on_sheets_sync_finished)
+        self._sync_worker.failed.connect(self._on_sync_failed)
+        self._sync_worker.start()
+
+    def _on_sheets_sync_finished(
+        self, count_clientes: int, count_registros: int, reporte: dict
+    ) -> None:
+        self._set_sync_enabled(True)
+        self._load_clients_combo()
+
+        msg = (
+            f"✅ Sincronización de Google Sheets completada — "
+            f"{count_clientes} clientes, {count_registros} registros guardados."
+        )
+        depurados = reporte.get("depurados", 0)
+        if depurados:
+            msg += f" 🧹 {depurados} registros depurados (borrados en el documento)."
+        self.set_status(msg, "success", toast=True)
+
+        colas = reporte.get("colas_afectadas") or []
+        if colas:
+            self.set_status(
+                f"⚠️ La depuración quitó registros de estas colas: {', '.join(colas)}. "
+                "Usa «Actualizar PDFs» en el Centro de Impresión para regenerarlas.",
+                "warning",
+                toast=True,
+            )
+            self.add_to_queue_requested.emit()
+
+        sin_atributos = reporte.get("sin_atributos") or []
+        if sin_atributos:
+            self.set_status(
+                f"ℹ️ Clientes sin atributos dinámicos (solo plantilla base): "
+                f"{', '.join(sin_atributos)}",
+                "info",
+                toast=True,
+            )
+
+        errores = reporte.get("errores_pestanas") or []
+        if errores:
+            self.set_status(
+                f"⚠️ No se pudieron leer estas pestañas: {', '.join(errores)}",
+                "warning",
+                toast=True,
+            )
+
+        self._sync_worker = None
+
 
 
     def _load_clients_combo(self) -> None:
-        """Carga las escuelas desde la BD al combobox de clientes."""
+        """Carga escuelas y negocios desde la BD al combobox de clientes.
+
+        El itemData es una tupla ``("escuela", school_api_id)`` o
+        ``("empresa", cliente_id)`` — las escuelas se identifican por su id
+        remoto de la API (histórico, permite refrescar desde ahí si no hay
+        datos locales); los negocios de Google Sheets no tienen id remoto,
+        así que se identifican directamente por su id local.
+        """
         from credencializacion.db.engine import get_session
         from credencializacion.db.models import Cliente
 
@@ -1436,36 +1551,70 @@ class ControlPanel(QWidget):
         self._combo_clients.clear()
 
         session = get_session()
-        clientes = session.query(Cliente).filter(
+        escuelas = session.query(Cliente).filter(
             Cliente.school_api_id.isnot(None)
         ).order_by(Cliente.nombre).all()
+        negocios = session.query(Cliente).filter(
+            Cliente.tipo == "empresa"
+        ).order_by(Cliente.nombre).all()
 
-        for cliente in clientes:
+        for cliente in escuelas:
             label = cliente.nombre
             if cliente.total_students:
                 label += f" ({cliente.total_students} alumnos)"
-            self._combo_clients.addItem(label, cliente.school_api_id)
+            self._combo_clients.addItem(label, ("escuela", cliente.school_api_id))
+
+        for cliente in negocios:
+            self._combo_clients.addItem(f"🏢 {cliente.nombre}", ("empresa", cliente.id))
 
         session.close()
         self._combo_clients.setCurrentIndex(-1)
         self._combo_clients.blockSignals(False)
 
     def _on_client_selected(self, index: int) -> None:
-        """Al seleccionar una escuela, muestra sus alumnos desde la BD local."""
-        school_id = self._combo_clients.itemData(index)
-        if school_id is None:
+        """Al seleccionar un cliente (escuela o negocio), muestra sus registros."""
+        item_data = self._combo_clients.itemData(index)
+        if item_data is None:
             self._table.setRowCount(0)
             self._lbl_page_info.setText("Mostrando 0 de 0 registros")
             self._combo_templates.clear()
             self._combo_templates.addItem("Plantillas")
             return
 
-        school_name = self._combo_clients.currentText()
+        kind, value = item_data
+        client_name = self._combo_clients.currentText()
 
-        # ── Intentar cargar desde la BD local ──────────────────────────────
         from credencializacion.db.engine import get_session
         from credencializacion.db.models import Cliente, Registro
 
+        if kind == "empresa":
+            # Cliente de Google Sheets: no tiene id remoto, así que todos sus
+            # datos ya viven localmente tras la sincronización — no hay
+            # fallback a ninguna API posible ni necesario.
+            with get_session() as session:
+                cliente = session.query(Cliente).get(value)
+                if cliente is None:
+                    self._table.setRowCount(0)
+                    self.set_status("⚠️ Cliente no encontrado", "warning")
+                    return
+                db_registros = (
+                    session.query(Registro).filter_by(cliente_id=cliente.id).all()
+                )
+                session.expunge_all()
+
+            self.load_records(db_registros)
+            self._load_client_templates(value)
+            self.set_status(
+                f"✅ {len(db_registros)} registros de {client_name} (Google Sheets).",
+                "success",
+            )
+            return
+
+        # kind == "escuela": comportamiento existente (API miescuela.net)
+        school_id = value
+        school_name = client_name
+
+        # ── Intentar cargar desde la BD local ──────────────────────────────
         with get_session() as session:
             cliente = session.query(Cliente).filter_by(school_api_id=school_id).first()
             if cliente:

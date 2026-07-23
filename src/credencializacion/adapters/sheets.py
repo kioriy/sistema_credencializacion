@@ -163,6 +163,80 @@ class FileAdapter(DataAdapter):
 
 
 # ═════════════════════════════════════════════════════════════════════
+# Helpers compartidos de autenticación (gspread)
+# ═════════════════════════════════════════════════════════════════════
+
+_SHEETS_SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets.readonly",
+    "https://www.googleapis.com/auth/drive.readonly",
+]
+
+
+def load_service_account_credentials(credentials_path: Path):
+    """Carga las credenciales de un service account de Google desde un JSON.
+
+    Raises:
+        FileNotFoundError: Si la ruta no existe.
+        ValueError: Si el archivo no es un JSON de service account válido.
+    """
+    from google.oauth2.service_account import Credentials
+
+    if not credentials_path.exists():
+        raise FileNotFoundError(
+            f"No se encontró el archivo de credenciales: {credentials_path}"
+        )
+    try:
+        return Credentials.from_service_account_file(
+            str(credentials_path), scopes=_SHEETS_SCOPES,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(
+            f"El archivo '{credentials_path.name}' no es un JSON de "
+            f"service account de Google válido: {exc}"
+        ) from exc
+
+
+def get_service_account_email(credentials_path: Path) -> str:
+    """Devuelve el ``client_email`` del service account (para mostrar al
+    usuario qué correo debe tener acceso de lector al documento)."""
+    creds = load_service_account_credentials(credentials_path)
+    return getattr(creds, "service_account_email", "") or ""
+
+
+def authorize_gspread_client(credentials_path: Path):
+    """Autoriza un cliente gspread con credenciales de service account."""
+    try:
+        import gspread
+    except ImportError as exc:
+        raise ImportError(
+            "Se requieren 'gspread' y 'google-auth' para acceder a "
+            "Google Sheets. Instale con: uv add gspread google-auth"
+        ) from exc
+
+    creds = load_service_account_credentials(credentials_path)
+    return gspread.authorize(creds)
+
+
+def open_spreadsheet_by_name(client, document_name: str):
+    """Abre (por título) el documento de Google Sheets indicado.
+
+    Raises:
+        ConnectionError: Si no se encuentra un documento con ese nombre
+                         visible para el service account.
+    """
+    import gspread
+
+    try:
+        return client.open(document_name)
+    except gspread.SpreadsheetNotFound:
+        raise ConnectionError(
+            f"No se encontró un documento de Google Sheets llamado "
+            f"'{document_name}'. Verifique el nombre y que el documento "
+            f"haya sido compartido con el correo del service account."
+        )
+
+
+# ═════════════════════════════════════════════════════════════════════
 # GoogleSheetsAdapter — gspread
 # ═════════════════════════════════════════════════════════════════════
 

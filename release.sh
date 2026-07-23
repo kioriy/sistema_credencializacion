@@ -12,7 +12,8 @@
 #    3. Hace commit con el cambio
 #    4. Crea el tag v1.0.1
 #    5. Hace push del commit y del tag a GitHub
-#    6. GitHub Actions compila el .exe automáticamente (~5 min)
+#    6. GitHub Actions compila el .exe (Windows) y el paquete de
+#       Raspberry Pi automáticamente (~5-10 min)
 # ============================================================
 
 set -e
@@ -124,11 +125,11 @@ echo -e "${GREEN}${BOLD}=====================================================${N
 echo -e "${GREEN}${BOLD}   ✅ Versión ${TAG} publicada exitosamente          ${NC}"
 echo -e "${GREEN}${BOLD}=====================================================${NC}"
 echo ""
-echo -e "  GitHub Actions está compilando el .exe ahora mismo."
+echo -e "  GitHub Actions está compilando Windows y Raspberry Pi ahora mismo."
 echo -e "  Revisa el progreso en:"
 echo -e "  ${BLUE}https://github.com/kioriy/sistema_credencializacion/actions${NC}"
 echo ""
-echo -e "  En ~5 minutos el Release estará disponible en:"
+echo -e "  En ~5-10 minutos el Release estará disponible con ambos paquetes en:"
 echo -e "  ${BLUE}https://github.com/kioriy/sistema_credencializacion/releases${NC}"
 echo ""
 echo -e "  Los usuarios verán la alerta de actualización"

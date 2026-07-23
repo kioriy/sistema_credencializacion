@@ -1,4 +1,4 @@
-name: Build & Release Windows EXE
+name: Build & Release (Windows + Raspberry Pi)
 
 # Disparadores:
 # - Al crear un tag v*.*.* (ej: v1.0.0) → crea un Release en GitHub
@@ -15,13 +15,28 @@ on:
         default: false
 
 jobs:
+  # ── Versión compartida por todos los jobs (evita recalcularla y que
+  # discrepe entre plataformas) ────────────────────────────────────────────
+  version:
+    name: Determinar versión
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Obtener versión del tag o fecha
+        id: version
+        shell: bash
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          else
+            echo "version=dev-$(date +%Y%m%d-%H%M)" >> $GITHUB_OUTPUT
+          fi
+
   build-windows:
     name: Build Windows EXE
+    needs: version
     runs-on: windows-latest
-
-    # ── Permisos necesarios para crear Releases en GitHub ────────────────────
-    permissions:
-      contents: write   # Requerido para crear y subir Releases
 
     steps:
       # ── 1. Obtener el código ──────────────────────────────────────────────
@@ -64,43 +79,119 @@ jobs:
           cd dist
           Compress-Archive -Path CredencializacionApp -DestinationPath CredencializacionApp-Windows.zip
 
-      # ── 6. Obtener versión del tag o fecha ───────────────────────────────
-      - name: Obtener versión
-        id: version
-        shell: bash
-        run: |
-          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
-            echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-          else
-            echo "version=dev-$(date +%Y%m%d-%H%M)" >> $GITHUB_OUTPUT
-          fi
-
-      # ── 7. Subir artefacto (siempre disponible en Actions) ───────────────
+      # ── 6. Subir artefacto (siempre disponible en Actions) ───────────────
       - name: Subir artefacto
         uses: actions/upload-artifact@v4
         with:
-          name: CredencializacionApp-Windows-${{ steps.version.outputs.version }}
+          name: CredencializacionApp-Windows-${{ needs.version.outputs.version }}
           path: dist/CredencializacionApp-Windows.zip
           retention-days: 30
 
-      # ── 8. Crear Release en GitHub (solo con tag o si se eligió manualmente)
+  # ── Build nativo en runner ARM64 (obligatorio: PyInstaller no compila
+  # cruzado, el binario resultante solo corre en la arquitectura donde se
+  # compiló). Requiere Raspberry Pi OS de 64 bits (aarch64) en el destino;
+  # PySide6 no publica ruedas para 32 bits (armhf/armv7l). ───────────────────
+  build-raspberry:
+    name: Build Raspberry Pi (Linux ARM64)
+    needs: version
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      # ── 1. Obtener el código ──────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── 2. Configurar Python ─────────────────────────────────────────────
+      - name: Configurar Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      # ── 3. Instalar dependencias ─────────────────────────────────────────
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install \
+            "PySide6>=6.7" \
+            "SQLAlchemy>=2.0" \
+            "reportlab>=4.0" \
+            "thefuzz[speedup]" \
+            "requests>=2.31" \
+            "openpyxl>=3.1" \
+            "qrcode[pil]>=7.4" \
+            "Pillow>=10.0" \
+            "gspread>=6.0" \
+            "google-auth>=2.0" \
+            "qtawesome>=1.4.2" \
+            "PyMuPDF>=1.24" \
+            "pyinstaller>=6.0"
+
+      # ── 4. Compilar con PyInstaller ──────────────────────────────────────
+      - name: Compilar ejecutable
+        run: pyinstaller credencializacion.spec --clean --noconfirm
+
+      # ── 5. Empaquetar la carpeta del ejecutable ───────────────────────────
+      # tar (no zip) para preservar el bit +x del binario en Linux.
+      - name: Empaquetar ejecutable
+        run: |
+          cd dist
+          tar -czf CredencializacionApp-RaspberryPi-arm64.tar.gz CredencializacionApp
+
+      # ── 6. Subir artefacto (siempre disponible en Actions) ───────────────
+      - name: Subir artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: CredencializacionApp-RaspberryPi-arm64-${{ needs.version.outputs.version }}
+          path: dist/CredencializacionApp-RaspberryPi-arm64.tar.gz
+          retention-days: 30
+
+  # ── Release único con ambos artefactos. Job separado (en vez de que cada
+  # build publique el suyo) para que no compitan dos jobs paralelos por crear
+  # el mismo Release al mismo tiempo. ─────────────────────────────────────────
+  release:
+    name: Crear GitHub Release
+    if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.create_release == 'true'
+    needs: [version, build-windows, build-raspberry]
+    runs-on: ubuntu-latest
+
+    # ── Permisos necesarios para crear Releases en GitHub ────────────────────
+    permissions:
+      contents: write   # Requerido para crear y subir Releases
+
+    steps:
+      - name: Descargar artefactos
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
       - name: Crear GitHub Release
-        if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.create_release == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.version.outputs.version }}
-          name: "Credencialización ${{ steps.version.outputs.version }}"
+          tag_name: ${{ needs.version.outputs.version }}
+          name: "Credencialización ${{ needs.version.outputs.version }}"
           draft: false
           prerelease: false
-          files: dist/CredencializacionApp-Windows.zip
+          files: |
+            artifacts/CredencializacionApp-Windows-${{ needs.version.outputs.version }}/CredencializacionApp-Windows.zip
+            artifacts/CredencializacionApp-RaspberryPi-arm64-${{ needs.version.outputs.version }}/CredencializacionApp-RaspberryPi-arm64.tar.gz
           body: |
-            ## CredencializacionApp ${{ steps.version.outputs.version }}
+            ## CredencializacionApp ${{ needs.version.outputs.version }}
 
-            ### Instalación
+            ### Windows
             1. Descarga `CredencializacionApp-Windows.zip`
             2. Extrae la carpeta completa
             3. Ejecuta `CredencializacionApp.exe`
 
             > La carpeta completa debe mantenerse junta — no muevas solo el `.exe`.
+
+            ### Raspberry Pi (4/5, Raspberry Pi OS de 64 bits)
+            1. Descarga `CredencializacionApp-RaspberryPi-arm64.tar.gz`
+            2. Extrae: `tar -xzf CredencializacionApp-RaspberryPi-arm64.tar.gz`
+            3. Ejecuta: `./CredencializacionApp/CredencializacionApp`
+
+            > La carpeta completa debe mantenerse junta — no muevas solo el binario.
+            > Requiere Raspberry Pi OS de **64 bits** (aarch64); no es compatible
+            > con Raspberry Pi OS de 32 bits (armhf/armv7l).
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -9,6 +9,7 @@ wheels/
 # Virtual environments
 .venv
 .venv_win
+.venv_pi
 
 # PyInstaller
 *.spec.bak

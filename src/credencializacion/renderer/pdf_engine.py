@@ -168,6 +168,7 @@ class PDFEngine:
         cara: str,
         output_path: Path,
         fondo_overrides: list[str | None] | None = None,
+        datos_extra: list[dict[str, str]] | None = None,
     ) -> Path:
         """Genera PDF de una cola de impresión (solo frentes o solo vueltas).
 
@@ -184,6 +185,10 @@ class PDFEngine:
                 ``i``, si ``fondo_overrides[i]`` no es ``None``, se usa esa ruta
                 como imagen de fondo (multiplantillaje por lado); si es ``None``,
                 se usa la imagen base del diseño (`Plantilla.recursos[fondo_lado]`).
+            datos_extra: Lista opcional alineada a ``items`` con atributos
+                calculados fuera del registro (p. ej. las fotos de hermanos
+                ``photo_url_hermano_2/3/4``). Tienen prioridad sobre
+                ``registro.datos`` al resolver un ``campo_dato``.
 
         Returns:
             La ruta al PDF generado.
@@ -195,11 +200,15 @@ class PDFEngine:
         if len(overrides) < len(items):
             overrides = list(overrides) + [None] * (len(items) - len(overrides))
 
+        extras = datos_extra or [{} for _ in items]
+        if len(extras) < len(items):
+            extras = list(extras) + [{} for _ in range(len(items) - len(extras))]
+
         # Req 5.9 / 9.3: omitir los ítems cuyo fondo (override de multiplantillaje
         # o imagen base del diseño) no puede cargarse, registrando un error que
         # identifica el registro y la imagen afectada y continuando con el resto.
-        renderable_items: list[tuple["Registro", "Plantilla", str | None]] = []
-        for (registro, plantilla), override in zip(items, overrides):
+        renderable_items: list[tuple["Registro", "Plantilla", str | None, dict]] = []
+        for (registro, plantilla), override, extra in zip(items, overrides, extras):
             if not self._can_load_resources_or_override(plantilla, cara, override):
                 logger.error(
                     "Omitiendo registro id=%s ('%s'): la imagen de fondo para la "
@@ -211,12 +220,12 @@ class PDFEngine:
                     getattr(plantilla, "nombre", "?"),
                 )
                 continue
-            renderable_items.append((registro, plantilla, override))
+            renderable_items.append((registro, plantilla, override, extra))
 
         for page_idx in range(0, len(renderable_items), self._cards_per_page):
             page_items = renderable_items[page_idx : page_idx + self._cards_per_page]
 
-            for slot_idx, (registro, plantilla, override) in enumerate(page_items):
+            for slot_idx, (registro, plantilla, override, extra) in enumerate(page_items):
                 if slot_idx >= len(self._card_positions):
                     break
 
@@ -232,12 +241,16 @@ class PDFEngine:
                 # asignada para este registro, sustituye el fondo del diseño.
                 self._current_base_img = override or recursos.get(base_key, "")
                 self._current_cara = cara
+                # Atributos calculados fuera del registro (fotos de hermanos).
+                # Mismo patrón que _current_base_img: contexto del ítem en curso.
+                self._current_extra = extra or {}
 
                 base_pos = self._card_positions[slot_idx]
                 self._render_card(c, registro, elementos, base_pos)
 
             c.showPage()
 
+        self._current_extra = {}
         c.save()
         logger.info(
             "PDF cola generado (%s): %s (%d registros)",
@@ -404,6 +417,17 @@ class PDFEngine:
             canvas.setFillColor(_hex_to_color(props["color"]))
             canvas.rect(x, y, w, h, fill=1, stroke=0)
 
+    def _dato(self, registro: "Registro", campo: str) -> str:
+        """Valor de un atributo del ítem en curso.
+
+        Los atributos calculados fuera del registro (``_current_extra``, p. ej.
+        las fotos de hermanos) tienen prioridad sobre ``registro.datos``.
+        """
+        extra = getattr(self, "_current_extra", None) or {}
+        if campo in extra:
+            return str(extra.get(campo, "") or "")
+        return str(registro.get_dato(campo, "") or "")
+
     def _get_element_text(self, registro: "Registro", elem: dict, props: dict) -> str:
         """Resuelve el texto a renderizar, manejando atributos simples y compuestos."""
         elem_type = elem.get("type", "")
@@ -415,12 +439,12 @@ class PDFEngine:
             result = template
             keys = re.findall(r"\{(\w+)\}", template)
             for k in keys:
-                result = result.replace(f"{{{k}}}", str(registro.get_dato(k, "")))
+                result = result.replace(f"{{{k}}}", self._dato(registro, k))
             return result
 
         campo = elem.get("campo_dato")
         if campo:
-            return str(registro.get_dato(campo, ""))
+            return self._dato(registro, campo)
         return props.get("text", "")
 
     def _draw_text(
@@ -529,7 +553,7 @@ class PDFEngine:
         img_path: str | None = None
 
         if campo:
-            val_str = str(registro.get_dato(campo, "") or "").strip()
+            val_str = self._dato(registro, campo).strip()
             img_path = self._resolve_image_path(val_str)
         elif src:
             img_path = self._resolve_image_path(str(src).strip())

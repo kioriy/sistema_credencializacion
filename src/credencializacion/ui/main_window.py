@@ -75,6 +75,9 @@ class MainWindow(QMainWindow):
         self._sidebar: Sidebar | None = None
         self._stack: QStackedWidget | None = None
 
+        # Origen de sincronización activo; el menú lo cambia y el botón lo usa.
+        self._sync_source: str = "api"
+
         self._setup_ui()
 
     # ------------------------------------------------------------------ UI
@@ -132,9 +135,43 @@ class MainWindow(QMainWindow):
         self.btn_print_front.clicked.connect(self._control_panel._on_print_front)
         self.btn_preview.clicked.connect(self._control_panel._on_preview)
         self.btn_add_queue.clicked.connect(self._control_panel._add_selected_to_queue)
-        self.btn_sync.clicked.connect(self._control_panel._on_sync_api)
+        self.btn_sync.clicked.connect(self._on_sync_clicked)
         # El panel deshabilita este botón mientras la sincronización corre
         self._control_panel.btn_sync_api = self.btn_sync
+
+    # ----------------------------------------------------- sincronización
+    def _set_sync_source(self, source: str) -> None:
+        """Selecciona el origen de sincronización (no la ejecuta).
+
+        El usuario elige el origen en el menú desplegable y después pulsa el
+        botón para lanzar la descarga.
+        """
+        etiquetas = {
+            "api": "app.miescuela.net",
+            "sheets": "Google Sheets",
+            "file": "Importar archivo (xlsx/csv)",
+        }
+        self._sync_source = source
+        etiqueta = etiquetas.get(source, source)
+        self.btn_sync.setToolTip(f"Sincronizar desde {etiqueta}")
+        self._control_panel.set_status(
+            f"Origen de sincronización: {etiqueta} — pulsa «Sincronizar» para iniciar.",
+            "sync",
+        )
+
+    def _on_sync_clicked(self) -> None:
+        """Lanza la sincronización con el origen seleccionado en el menú."""
+        source = getattr(self, "_sync_source", "api")
+        if source == "sheets":
+            self._control_panel._on_sync_sheets()
+        elif source == "file":
+            self._control_panel.set_status(
+                "⚠️ La importación desde archivo aún no está disponible. "
+                "Elige otro origen en el menú de Sincronizar.",
+                "warning",
+            )
+        else:
+            self._control_panel._on_sync_api()
 
     # --------------------------------------------------------- toolbars
     def _create_toolbars(self) -> None:
@@ -147,7 +184,16 @@ class MainWindow(QMainWindow):
         
         self.btn_sync = QToolButton()
         self.btn_sync.setText("Sincronizar")
-        self.btn_sync.setIcon(qta.icon("fa5s.sync-alt", color=COLORS["text"]))
+        # `color_disabled` explícito: sin él, el icono se desvanece casi por
+        # completo mientras la sincronización corre (el botón queda
+        # deshabilitado) y parece que desapareció.
+        self.btn_sync.setIcon(
+            qta.icon(
+                "fa5s.sync-alt",
+                color=COLORS["text"],
+                color_disabled=COLORS["text_light"],
+            )
+        )
         self.btn_sync.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.btn_sync.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
         self.btn_sync.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
@@ -171,15 +217,12 @@ class MainWindow(QMainWindow):
         self.action_sync_file = self.menu_sync.addAction("Importar archivo (xlsx/csv)")
         self.btn_sync.setMenu(self.menu_sync)
         
-        self.action_sync_app.triggered.connect(
-            lambda: self._control_panel.set_status("Origen de sincronización: app.miescuela.net", "sync")
-        )
-        self.action_sync_sheets.triggered.connect(
-            lambda: self._control_panel.set_status("Origen de sincronización: Google Sheets", "sync")
-        )
-        self.action_sync_file.triggered.connect(
-            lambda: self._control_panel.set_status("Origen de sincronización: Importar archivo (xlsx/csv)", "sync")
-        )
+        # El menú SOLO elige el origen; la sincronización la dispara el botón.
+        # (Conectar las acciones directamente al handler hacía que con solo
+        # abrir el menú y elegir ya arrancara la descarga.)
+        self.action_sync_app.triggered.connect(lambda: self._set_sync_source("api"))
+        self.action_sync_sheets.triggered.connect(lambda: self._set_sync_source("sheets"))
+        self.action_sync_file.triggered.connect(lambda: self._set_sync_source("file"))
 
         tb_layout.addWidget(self.btn_print_front)
         tb_layout.addWidget(self.btn_preview)

@@ -56,3 +56,24 @@ class AppSettings:
         s.setValue("print/page_width", width_mm)
         s.setValue("print/page_height", height_mm)
         s.sync()
+
+    # ── Sincronización con Google Sheets ────────────────────────────
+
+    @staticmethod
+    def get_sheets_credentials_path() -> str:
+        """Ruta al archivo JSON de credenciales del service account de Google."""
+        return str(get_settings().value("sheets/credentials_path", ""))
+
+    @staticmethod
+    def get_sheets_document_name() -> str:
+        """Nombre del documento de Google Sheets a sincronizar."""
+        s = get_settings()
+        return str(s.value("sheets/document_name", "") or "clientes negocios")
+
+    @staticmethod
+    def set_sheets_config(credentials_path: str, document_name: str) -> None:
+        """Guarda la configuración de sincronización con Google Sheets."""
+        s = get_settings()
+        s.setValue("sheets/credentials_path", credentials_path)
+        s.setValue("sheets/document_name", document_name)
+        s.sync()
