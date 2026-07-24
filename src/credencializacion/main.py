@@ -33,6 +33,11 @@ def main() -> None:
 
     app = create_app(sys.argv)
 
+    # Sembrar el perfil de posición por defecto desde la calibración global
+    # existente (idempotente): garantiza que siempre haya al menos un perfil.
+    from credencializacion.core.settings import AppSettings
+    AppSettings.ensure_default_profile()
+
     # 3. Crear y mostrar la ventana principal
     from credencializacion.ui.main_window import MainWindow
 

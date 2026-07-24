@@ -94,12 +94,14 @@ class CanvasToolbar(QWidget):
     DEFAULT_ATTRIBUTES = [
         ("composite",  "📝",  "Texto Compuesto",    "composite"),
         ("photo_path", "🖼",  "Imagen",              "photo_url"),
-        # Fotos de hermanos: se resuelven al imprimir por `tutor_email`.
-        # Pensados para credenciales de autorizados, que muestran a todos
-        # los alumnos que esa persona puede recoger.
-        ("photo_path", "👨‍👩‍👦", "Foto Hermano 2",     "photo_url_hermano_2"),
-        ("photo_path", "👨‍👩‍👦", "Foto Hermano 3",     "photo_url_hermano_3"),
-        ("photo_path", "👨‍👩‍👦", "Foto Hermano 4",     "photo_url_hermano_4"),
+        # Slots de hermano de TEXTO: un solo arrastrable por dato; el número de
+        # hermano (2/3/4) se elige en las propiedades. Se resuelven al imprimir
+        # por `tutor_email` (credenciales de autorizados). La FOTO del hermano
+        # se asigna reutilizando el atributo de imagen: se arrastra "Imagen",
+        # origen "Atributo", y se elige "Hermano 2/3/4" en el combo de imagen.
+        ("text",       "👨‍👩‍👦", "Nombre Hermano",     "nombre_hermano_2"),
+        ("text",       "👨‍👩‍👦", "Grado Hermano",      "grado_hermano_2"),
+        ("text",       "👨‍👩‍👦", "Grupo Hermano",      "grupo_hermano_2"),
         ("text",       "👤",  "Nombre",              "nombre"),
         ("text",       "👤",  "Apellidos",           "apellido"),
         ("text",       "🏢",  "Escuela",             "escuela"),
@@ -667,6 +669,18 @@ class PropertiesPanel(QWidget):
         )
         self._row_circle_radius = self._f_dyn.addRow("Radio:", self._spin_circle_radius)
 
+        # ── Selector de hermano (slots de hermano: foto/nombre/grado/grupo) ──
+        # Un solo arrastrable por dato; aquí se elige el número de hermano.
+        # Reescribe el sufijo del `campo_dato` (…_hermano_2 → …_hermano_3).
+        from credencializacion.services.print_rules import SIBLING_SLOT_NUMBERS
+        self._combo_sibling = QComboBox()
+        for n in SIBLING_SLOT_NUMBERS:
+            self._combo_sibling.addItem(f"Hermano {n}", n)
+        self._combo_sibling.setStyleSheet(self._input_style())
+        self._stretch_combo(self._combo_sibling)
+        self._combo_sibling.currentIndexChanged.connect(self._on_sibling_changed)
+        self._row_sibling = self._f_dyn.addRow("Hermano:", self._combo_sibling)
+
         # ── Requerido para impresión ──────────────────────────────────────
         # Si el registro no aporta el dato de este elemento, su credencial no
         # se genera (y tampoco su vuelta, para no desalinear la hoja).
@@ -808,6 +822,7 @@ class PropertiesPanel(QWidget):
         self._f_dyn.setRowVisible(self._chk_circular, False)
         self._f_dyn.setRowVisible(self._spin_circle_radius, False)
         self._f_dyn.setRowVisible(self._combo_text_rule, False)
+        self._f_dyn.setRowVisible(self._combo_sibling, False)
         # "Requerido para impresión" solo aplica a elementos que dependen de
         # los datos del registro; formas y fondos no dependen de él.
         depende_de_datos = elem_type in (
@@ -824,12 +839,23 @@ class PropertiesPanel(QWidget):
                        self._combo_render_as, self._chk_qr_bg,
                        self._combo_barcode_format, self._edit_test_text, self._edit_composite,
                        self._combo_align, self._chk_circular, self._spin_circle_radius,
-                       self._chk_required):
+                       self._chk_required, self._combo_sibling):
             widget.blockSignals(True)
 
         if depende_de_datos:
             self._w_dynamic_group.setVisible(True)
             self._chk_required.setChecked(props.get("required_for_print", False))
+
+        # Slot de hermano de TEXTO (nombre/grado/grupo): mostrar el selector
+        # 2/3/4. Las fotos de hermano usan el combo de atributo-imagen, que ya
+        # elige el número, así que ahí NO se muestra este selector.
+        from credencializacion.services.print_rules import parse_sibling_attr
+        _sib = parse_sibling_attr(element.get("campo_dato", ""))
+        if _sib is not None and elem_type not in ("image", "photo_path"):
+            _, _n = _sib
+            self._f_dyn.setRowVisible(self._combo_sibling, True)
+            _i = self._combo_sibling.findData(_n)
+            self._combo_sibling.setCurrentIndex(_i if _i >= 0 else 0)
 
         self._spin_x.setValue(element.get("x", 0))
         self._spin_y.setValue(element.get("y", 0))
@@ -933,8 +959,23 @@ class PropertiesPanel(QWidget):
                        self._combo_render_as, self._chk_qr_bg,
                        self._combo_barcode_format, self._edit_test_text, self._edit_composite,
                        self._combo_align, self._chk_circular, self._spin_circle_radius,
-                       self._chk_required):
+                       self._chk_required, self._combo_sibling):
             widget.blockSignals(False)
+
+    def _on_sibling_changed(self, _index: int) -> None:
+        """Cambia el número de hermano reescribiendo el sufijo del campo_dato."""
+        from credencializacion.services.print_rules import (
+            parse_sibling_attr, sibling_attr,
+        )
+        if not self._current_element:
+            return
+        campo = self._current_element.get("campo_dato", "")
+        parsed = parse_sibling_attr(campo)
+        if parsed is None:
+            return
+        base, _ = parsed
+        nuevo_n = self._combo_sibling.currentData()
+        self.property_changed.emit("campo_dato", sibling_attr(base, int(nuevo_n)))
 
     def _on_circular_toggled(self, checked: bool) -> None:
         self.property_changed.emit("is_circular", checked)
@@ -952,13 +993,12 @@ class PropertiesPanel(QWidget):
     def set_image_attributes(self, attributes: list[str]) -> None:
         """Puebla el combobox de atributos de imagen (origen 'Atributo').
 
-        Además de los atributos de imagen del cliente, se ofrecen siempre los
-        slots de foto de hermanos: no vienen en los datos del registro, se
-        resuelven al imprimir buscando a los alumnos que comparten
-        ``tutor_email``.
+        Reutiliza este control para las fotos de hermano: se ofrecen siempre
+        "Hermano 2/3/4" como orígenes de imagen. No vienen en los datos del
+        registro; se resuelven al imprimir por ``tutor_email``.
         """
         from credencializacion.services.print_rules import (
-            SIBLING_PHOTO_ATTRS, SIBLING_PHOTO_LABELS,
+            SIBLING_SLOT_NUMBERS, sibling_attr,
         )
 
         self._img_attributes = list(attributes or [])
@@ -967,9 +1007,10 @@ class PropertiesPanel(QWidget):
         self._combo_img_attr.addItem("Selecciona un atributo…", "")
         for attr in self._img_attributes:
             self._combo_img_attr.addItem(attr, attr)
-        for attr in SIBLING_PHOTO_ATTRS:
-            if attr not in self._img_attributes:
-                self._combo_img_attr.addItem(f"👨‍👩‍👦 {SIBLING_PHOTO_LABELS[attr]}", attr)
+        for n in SIBLING_SLOT_NUMBERS:
+            self._combo_img_attr.addItem(
+                f"👨‍👩‍👦 Hermano {n}", sibling_attr("photo_url", n)
+            )
         self._combo_img_attr.blockSignals(False)
 
     def _on_img_source_changed(self, text: str) -> None:

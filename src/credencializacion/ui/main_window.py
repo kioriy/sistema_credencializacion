@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QToolBar,
     QToolButton,
     QMenu,
+    QComboBox,
 )
 
 from credencializacion.ui.styles import COLORS
@@ -307,10 +308,50 @@ class MainWindow(QMainWindow):
         # 3 — Centro de Impresión
         tb_print = self._make_toolbar_frame()
         tb_pr_layout = tb_print.layout()
+
+        # Izquierda: acciones sobre la cola.
         self.btn_print_refresh = self._make_toolbar_btn("fa5s.sync-alt", "Actualizar Colas", primary=False)
         self.btn_print_refresh.clicked.connect(self._print_center.refresh_queues)
         tb_pr_layout.addWidget(self.btn_print_refresh)
+
+        self.btn_pr_update = self._make_toolbar_btn("fa5s.file-pdf", "Actualizar PDFs", primary=False)
+        self.btn_pr_update.clicked.connect(lambda: self._print_center._update_queue_pdfs())
+        tb_pr_layout.addWidget(self.btn_pr_update)
+
+        self.btn_pr_copy = self._make_toolbar_btn("fa5s.copy", "Copiar cola", primary=False)
+        self.btn_pr_copy.clicked.connect(self._print_center._copy_selected_queue)
+        tb_pr_layout.addWidget(self.btn_pr_copy)
+
         tb_pr_layout.addStretch()
+
+        # Derecha: selector de perfil de posición y luego de impresora.
+        lbl_prof = QLabel("Perfil:")
+        lbl_prof.setStyleSheet(f"color: {COLORS['text']}; font-weight: 600;")
+        tb_pr_layout.addWidget(lbl_prof)
+        self.cb_print_profile = QComboBox()
+        self.cb_print_profile.setMinimumWidth(160)
+        self.cb_print_profile.setMinimumHeight(38)
+        tb_pr_layout.addWidget(self.cb_print_profile)
+
+        lbl_printer = QLabel("Impresora:")
+        lbl_printer.setStyleSheet(f"color: {COLORS['text']}; font-weight: 600;")
+        tb_pr_layout.addWidget(lbl_printer)
+        self.cb_print_printer = QComboBox()
+        self.cb_print_printer.setMinimumWidth(220)
+        self.cb_print_printer.setMinimumHeight(38)
+        tb_pr_layout.addWidget(self.cb_print_printer)
+
+        self._populate_print_selectors()
+
+        # Inyectar referencias en el Centro de Impresión: lee la selección y
+        # actualiza el estado de los botones movidos durante el render.
+        self._print_center.cb_profile = self.cb_print_profile
+        self._print_center.cb_printer = self.cb_print_printer
+        self._print_center._tb_btn_update = self.btn_pr_update
+        self._print_center._tb_btn_copy = self.btn_pr_copy
+        # Al elegir impresora, preseleccionar su perfil asociado si existe.
+        self.cb_print_printer.currentIndexChanged.connect(self._on_toolbar_printer_changed)
+
         self._toolbar_stack.addWidget(tb_print)
 
         # Conectar señal de cola creada → auto-refrescar Centro de Impresión
@@ -337,6 +378,52 @@ class MainWindow(QMainWindow):
         tb_support = self._make_toolbar_frame()
         tb_support.layout().addStretch()
         self._toolbar_stack.addWidget(tb_support)
+
+    def _populate_print_selectors(self) -> None:
+        """Puebla los selectores de perfil e impresora del Centro de Impresión."""
+        from credencializacion.core.settings import AppSettings
+
+        AppSettings.ensure_default_profile()
+        prev_prof = self.cb_print_profile.currentData()
+        self.cb_print_profile.blockSignals(True)
+        self.cb_print_profile.clear()
+        for name in AppSettings.list_position_profiles():
+            self.cb_print_profile.addItem(name, name)
+        if prev_prof:
+            i = self.cb_print_profile.findData(prev_prof)
+            if i >= 0:
+                self.cb_print_profile.setCurrentIndex(i)
+        self.cb_print_profile.blockSignals(False)
+
+        prev_prn = self.cb_print_printer.currentData()
+        try:
+            from credencializacion.core.printer import get_system_printers
+            impresoras = get_system_printers()
+        except Exception:  # noqa: BLE001
+            impresoras = []
+        self.cb_print_printer.blockSignals(True)
+        self.cb_print_printer.clear()
+        self.cb_print_printer.addItem("(sin impresora)", "")
+        for name in impresoras:
+            self.cb_print_printer.addItem(name, name)
+        if prev_prn:
+            i = self.cb_print_printer.findData(prev_prn)
+            if i >= 0:
+                self.cb_print_printer.setCurrentIndex(i)
+        self.cb_print_printer.blockSignals(False)
+
+    def _on_toolbar_printer_changed(self, _index: int) -> None:
+        """Al elegir impresora, preselecciona su perfil de posición asociado."""
+        from credencializacion.core.settings import AppSettings
+
+        printer = self.cb_print_printer.currentData() or ""
+        if not printer:
+            return
+        perfil = AppSettings.get_profile_for_printer(printer)
+        if perfil:
+            i = self.cb_print_profile.findData(perfil)
+            if i >= 0:
+                self.cb_print_profile.setCurrentIndex(i)
 
     def _make_toolbar_frame(self) -> QFrame:
         """Crea el contenedor base de una toolbar."""
@@ -478,8 +565,9 @@ class MainWindow(QMainWindow):
         if 0 <= index < self._toolbar_stack.count():
             self._toolbar_stack.setCurrentIndex(index)
 
-        # Auto-refrescar colas al navegar al Centro de Impresión (índice 3)
+        # Auto-refrescar colas y selectores al navegar al Centro de Impresión.
         if index == 3:
+            self._populate_print_selectors()
             self._print_center.refresh_queues()
 
     def _on_update_requested(self) -> None:

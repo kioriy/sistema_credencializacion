@@ -6,10 +6,11 @@ Agrupa tres reglas que se aplican antes de renderizar una cola:
 - **Atributos requeridos**: un elemento del diseño puede marcarse como
   ``required_for_print``; si el registro no aporta ese dato, la credencial
   no se genera para ese registro.
-- **Hermanos**: los alumnos que comparten ``tutor_email`` son hermanos.
-  Sus fotos alimentan los slots ``photo_url_hermano_2/3/4`` de la plantilla
-  (pensados para credenciales de autorizados, que muestran a todos los
-  alumnos que esa persona puede recoger).
+- **Hermanos**: los alumnos que comparten ``tutor_email`` (misma escuela)
+  son hermanos. Sus datos alimentan los slots de hermano de la plantilla
+  —foto, nombre, grado y grupo por cada N (``*_hermano_2/3/4``)— pensados
+  para credenciales de autorizados, que muestran a todos los alumnos que
+  esa persona puede recoger.
 - **Colapsado por familia**: cuando la plantilla usa slots de hermanos,
   varios hermanos en la misma cola producirían credenciales redundantes,
   así que se conserva solo la primera del grupo familiar.
@@ -27,20 +28,60 @@ from typing import Any, Iterable
 
 logger = logging.getLogger(__name__)
 
-# Slots de foto de hermanos. El slot 1 es el ``photo_url`` que ya existe: el
-# alumno de la credencial. Estos son los hermanos 2, 3 y 4.
-SIBLING_PHOTO_ATTRS: tuple[str, ...] = (
-    "photo_url_hermano_2",
-    "photo_url_hermano_3",
-    "photo_url_hermano_4",
-)
+# Slots de hermano. El slot 1 es el propio alumno de la credencial (usa los
+# atributos normales ``photo_url``/``nombre``/…). Los slots 2, 3 y 4 son sus
+# hermanos, resueltos al imprimir por ``tutor_email``. Cada slot N expone
+# cuatro atributos —foto, nombre, grado y grupo— que comparten el mismo N, de
+# modo que todos describen al mismo hermano.
+SIBLING_SLOT_NUMBERS: tuple[int, ...] = (2, 3, 4)
 
-# Etiquetas legibles para la UI (panel de atributos y combo de imagen).
-SIBLING_PHOTO_LABELS: dict[str, str] = {
-    "photo_url_hermano_2": "Foto Hermano 2",
-    "photo_url_hermano_3": "Foto Hermano 3",
-    "photo_url_hermano_4": "Foto Hermano 4",
+# Bases de atributo de hermano → etiqueta legible del arrastrable del editor.
+# El orden define el orden de los arrastrables en la barra de atributos.
+SIBLING_BASES: dict[str, str] = {
+    "photo_url": "Foto Hermano",
+    "nombre": "Nombre Hermano",
+    "grado": "Grado Hermano",
+    "grupo": "Grupo Hermano",
 }
+
+# Bases cuyo slot es una imagen (para saber si un elemento es foto de hermano).
+SIBLING_PHOTO_BASES: frozenset[str] = frozenset({"photo_url"})
+
+
+def sibling_attr(base: str, n: int) -> str:
+    """Nombre del atributo de slot: ``sibling_attr("nombre", 3)`` → ``nombre_hermano_3``."""
+    return f"{base}_hermano_{n}"
+
+
+def parse_sibling_attr(campo: str) -> tuple[str, int] | None:
+    """Descompone un atributo de slot en ``(base, n)``; ``None`` si no lo es.
+
+    ``parse_sibling_attr("photo_url_hermano_2")`` → ``("photo_url", 2)``.
+    """
+    m = re.fullmatch(r"(.+)_hermano_(\d+)", str(campo or ""))
+    if not m:
+        return None
+    base, n = m.group(1), int(m.group(2))
+    if base in SIBLING_BASES and n in SIBLING_SLOT_NUMBERS:
+        return base, n
+    return None
+
+
+def is_sibling_attr(campo: str) -> bool:
+    """True si ``campo`` es un atributo de slot de hermano (cualquier base)."""
+    return parse_sibling_attr(campo) is not None
+
+
+def is_sibling_photo_attr(campo: str) -> bool:
+    """True si ``campo`` es específicamente una FOTO de hermano."""
+    parsed = parse_sibling_attr(campo)
+    return parsed is not None and parsed[0] in SIBLING_PHOTO_BASES
+
+
+# Todas las fotos de hermano (compat con el uso previo por nombre).
+SIBLING_PHOTO_ATTRS: tuple[str, ...] = tuple(
+    sibling_attr("photo_url", n) for n in SIBLING_SLOT_NUMBERS
+)
 
 
 # ── Hermanos ──────────────────────────────────────────────────────────────
@@ -186,45 +227,65 @@ def has_siblings(registro: Any, grupos: dict[str, list[Any]]) -> bool:
     return len(grupos.get(clave, ())) > 1
 
 
-def sibling_photo_extras(
+def _valor_base_hermano(hermano: Any, base: str) -> str:
+    """Valor de una base de atributo para un hermano concreto."""
+    if base == "photo_url":
+        foto = str(hermano.get_dato("photo_url", "") or "").strip()
+        if not foto:
+            foto = str(getattr(hermano, "photo_path", "") or "").strip()
+        return foto
+    if base == "nombre":
+        # Nombre completo (con apellidos) del hermano.
+        nombre = str(getattr(hermano, "nombre_completo", "") or "").strip()
+        return nombre or str(hermano.get_dato("nombre", "") or "").strip()
+    return str(hermano.get_dato(base, "") or "").strip()
+
+
+def sibling_extras(
     registro: Any,
     grupos: dict[str, list[Any]],
-    slot_order: list[str] | None = None,
+    slot_order: list[int] | None = None,
 ) -> dict[str, str]:
-    """Fotos de los hermanos del registro, asignadas a los slots 2/3/4.
+    """Datos de los hermanos del registro, asignados a los slots 2/3/4.
+
+    Devuelve un dict con TODOS los atributos de slot (foto, nombre, grado y
+    grupo por cada N), de modo que el motor de render los resuelva vía
+    ``_current_extra``. Los atributos con el mismo N describen al mismo
+    hermano, así que la foto y el nombre de un slot siempre coinciden.
 
     Solo se consideran hermanos de la MISMA escuela (la agrupación está
     anclada al ``cliente_id``): un hermano de una filial no reserva slot. El
-    propio alumno se excluye (ocupa el slot 1 vía ``photo_url``). Los
-    hermanos van ordenados por grado descendente.
+    propio alumno se excluye (ocupa el slot 1 vía los atributos normales).
+    Los hermanos van ordenados por grado descendente.
 
-    ``slot_order`` define en qué orden se rellenan los slots. Cuando la
-    plantilla coloca los slots en un orden visual distinto al numérico
-    (p. ej. ``hermano_3`` a la izquierda de ``hermano_2``), pasar el orden
-    visual evita dejar un hueco entre el alumno y su primer hermano: los
-    hermanos llenan los slots de izquierda a derecha, no por número. Si no
-    se indica, se usa el orden numérico por defecto (``hermano_2/3/4``).
+    ``slot_order`` es una lista de NÚMEROS de slot (2/3/4) en el orden en que
+    se rellenan. Cuando la plantilla coloca los slots en un orden visual
+    distinto al numérico (p. ej. el slot 3 a la izquierda del 2), pasar el
+    orden visual evita dejar un hueco entre el alumno y su primer hermano.
+    Si no se indica, se usa el orden numérico (2, 3, 4).
 
     Los slots sin hermano quedan en cadena vacía, que el motor de render
     dibuja como espacio en blanco.
     """
-    extras = {attr: "" for attr in SIBLING_PHOTO_ATTRS}
+    extras: dict[str, str] = {
+        sibling_attr(base, n): ""
+        for n in SIBLING_SLOT_NUMBERS
+        for base in SIBLING_BASES
+    }
 
     clave = family_key(registro)
     if not clave:
         return extras
 
-    orden = slot_order or list(SIBLING_PHOTO_ATTRS)
+    orden = slot_order or list(SIBLING_SLOT_NUMBERS)
 
     familia = grupos.get(clave, [])
     propio_id = getattr(registro, "id", None)
     hermanos = [h for h in familia if getattr(h, "id", None) != propio_id]
 
-    for slot, hermano in zip(orden, hermanos):
-        foto = str(hermano.get_dato("photo_url", "") or "").strip()
-        if not foto:
-            foto = str(getattr(hermano, "photo_path", "") or "").strip()
-        extras[slot] = foto
+    for n, hermano in zip(orden, hermanos):
+        for base in SIBLING_BASES:
+            extras[sibling_attr(base, n)] = _valor_base_hermano(hermano, base)
 
     return extras
 
@@ -240,14 +301,14 @@ def _iter_elementos(plantilla: Any) -> Iterable[dict]:
 
 
 def template_uses_sibling_slots(plantilla: Any) -> bool:
-    """Indica si algún elemento del diseño está ligado a una foto de hermano.
+    """Indica si algún elemento del diseño está ligado a un slot de hermano.
 
-    Determina si procede colapsar familias: sin esta comprobación, cualquier
-    cola normal de credenciales de alumno empezaría a descartar hermanos
-    silenciosamente.
+    Considera cualquier base (foto, nombre, grado o grupo). Determina si
+    procede colapsar familias: sin esta comprobación, cualquier cola normal
+    de credenciales de alumno empezaría a descartar hermanos silenciosamente.
     """
     for elem in _iter_elementos(plantilla):
-        if elem.get("campo_dato", "") in SIBLING_PHOTO_ATTRS:
+        if is_sibling_attr(elem.get("campo_dato", "")):
             return True
     return False
 
@@ -257,38 +318,39 @@ def template_uses_sibling_slots(plantilla: Any) -> bool:
 _FILA_BANDA_MM = 10.0
 
 
-def template_sibling_slots_in_order(plantilla: Any) -> list[str]:
-    """Slots de foto de hermano de la plantilla, en orden visual de lectura.
+def template_sibling_slot_order(plantilla: Any) -> list[int]:
+    """Números de slot de hermano (2/3/4) usados, en orden visual de lectura.
 
-    Ordena por filas (de arriba a abajo) y, dentro de cada fila, de izquierda
-    a derecha. Así los hermanos se asignan siguiendo la disposición real del
-    diseño y no por el número del atributo: si el usuario colocó
-    ``hermano_3`` a la izquierda de ``hermano_2``, el primer hermano ocupa el
-    slot de la izquierda y no queda un hueco intermedio.
+    A cada número N se le asigna la posición de su elemento más a la
+    izquierda/arriba entre TODOS sus atributos (foto, nombre, grado, grupo).
+    Ordena por filas (arriba→abajo) y dentro de cada fila de izquierda a
+    derecha. Así los hermanos se asignan siguiendo la disposición del diseño
+    y no por el número del atributo: si el usuario colocó el slot 3 a la
+    izquierda del 2, el primer hermano ocupa el de la izquierda sin dejar un
+    hueco intermedio. Todos los atributos del mismo N reciben al mismo
+    hermano, así que foto y nombre de un slot siempre coinciden.
 
-    Devuelve cada ``campo_dato`` una sola vez, conservando el orden.
+    Devuelve cada número una sola vez, conservando el orden.
     """
-    posiciones: list[tuple[float, float, str]] = []
+    # Posición representativa de cada número: la mínima (fila, x) entre sus
+    # elementos.
+    mejor: dict[int, tuple[float, float]] = {}
     for elem in _iter_elementos(plantilla):
-        campo = elem.get("campo_dato", "")
-        if campo not in SIBLING_PHOTO_ATTRS:
+        parsed = parse_sibling_attr(elem.get("campo_dato", ""))
+        if parsed is None:
             continue
+        _, n = parsed
         try:
             y = float(elem.get("y", 0) or 0)
             x = float(elem.get("x", 0) or 0)
         except (TypeError, ValueError):
             y, x = 0.0, 0.0
-        # Banda de fila para que jitter vertical no rompa el orden horizontal.
         fila = round(y / _FILA_BANDA_MM)
-        posiciones.append((fila, x, campo))
+        pos = (float(fila), x)
+        if n not in mejor or pos < mejor[n]:
+            mejor[n] = pos
 
-    posiciones.sort(key=lambda t: (t[0], t[1]))
-
-    orden: list[str] = []
-    for _, _, campo in posiciones:
-        if campo not in orden:
-            orden.append(campo)
-    return orden
+    return [n for n, _ in sorted(mejor.items(), key=lambda kv: kv[1])]
 
 
 def collapse_families(
@@ -341,7 +403,11 @@ def _etiqueta_elemento(elem: dict, props: dict) -> str:
         return etiqueta
     campo = str(elem.get("campo_dato", "") or "").strip()
     if campo:
-        return SIBLING_PHOTO_LABELS.get(campo, campo)
+        parsed = parse_sibling_attr(campo)
+        if parsed is not None:
+            base, n = parsed
+            return f"{SIBLING_BASES[base]} {n}"
+        return campo
     if elem.get("type") == "composite":
         return "texto compuesto"
     return elem.get("type", "elemento")

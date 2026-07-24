@@ -188,6 +188,11 @@ class PrintCenter(QWidget):
         self._mark_workers: list = []
         self._render_worker = None
         self._render_on_done = None
+        # (cara, impresora) pendiente cuando se regenera antes de imprimir.
+        self._pending_print: tuple = (None, None)
+        # Selectores del toolbar (inyectados por MainWindow).
+        self.cb_profile = None
+        self.cb_printer = None
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -458,49 +463,51 @@ class PrintCenter(QWidget):
 
         layout.addWidget(self._detail_table, stretch=1)
 
-        # Botones de acción
+        # Botones de acción. "Actualizar PDFs" y "Copiar cola" se movieron al
+        # toolbar (izquierda); aquí quedan las acciones sobre la cola activa.
         action_bar = QHBoxLayout()
         action_bar.setSpacing(8)
 
         action_bar.addStretch()
 
-        # Actualizar PDFs (borra los anteriores y regenera con la plantilla vigente)
-        self._btn_update_pdfs = QPushButton()
-        self._btn_update_pdfs.setIcon(qta.icon("fa5s.sync-alt", color=TEXT_DARK))
-        self._btn_update_pdfs.setIconSize(QSize(16, 16))
-        self._btn_update_pdfs.setText("  Actualizar PDFs")
-        self._btn_update_pdfs.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self._btn_update_pdfs.setStyleSheet(self._action_btn_style(False))
-        self._btn_update_pdfs.clicked.connect(self._update_queue_pdfs)
-        action_bar.addWidget(self._btn_update_pdfs)
+        # Imprimir Frente: envía el PDF de frentes directo a la impresora
+        # seleccionada en el toolbar.
+        self._btn_send_front = QPushButton()
+        self._btn_send_front.setIcon(qta.icon("fa5s.print", color="#FFFFFF"))
+        self._btn_send_front.setIconSize(QSize(16, 16))
+        self._btn_send_front.setText("  Imprimir Frente")
+        self._btn_send_front.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._btn_send_front.setStyleSheet(self._action_btn_style(True))
+        self._btn_send_front.clicked.connect(lambda: self._print_side("frente"))
+        action_bar.addWidget(self._btn_send_front)
 
-        # Copiar cola (duplica la cola eligiendo la plantilla a aplicar)
-        self._btn_copy_queue = QPushButton()
-        self._btn_copy_queue.setIcon(qta.icon("fa5s.copy", color=TEXT_DARK))
-        self._btn_copy_queue.setIconSize(QSize(16, 16))
-        self._btn_copy_queue.setText("  Copiar cola")
-        self._btn_copy_queue.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self._btn_copy_queue.setStyleSheet(self._action_btn_style(False))
-        self._btn_copy_queue.clicked.connect(self._copy_selected_queue)
-        action_bar.addWidget(self._btn_copy_queue)
+        # Imprimir Vuelta
+        self._btn_send_back = QPushButton()
+        self._btn_send_back.setIcon(qta.icon("fa5s.print", color="#FFFFFF"))
+        self._btn_send_back.setIconSize(QSize(16, 16))
+        self._btn_send_back.setText("  Imprimir Vuelta")
+        self._btn_send_back.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._btn_send_back.setStyleSheet(self._action_btn_style(True))
+        self._btn_send_back.clicked.connect(lambda: self._print_side("vuelta"))
+        action_bar.addWidget(self._btn_send_back)
 
         # Abrir Frente (abre el PDF de frentes guardado en el visor del sistema)
         self._btn_print_front = QPushButton()
-        self._btn_print_front.setIcon(qta.icon("fa5s.external-link-alt", color="#FFFFFF"))
+        self._btn_print_front.setIcon(qta.icon("fa5s.external-link-alt", color=TEXT_DARK))
         self._btn_print_front.setIconSize(QSize(16, 16))
         self._btn_print_front.setText("  Abrir Frente")
         self._btn_print_front.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self._btn_print_front.setStyleSheet(self._action_btn_style(True))
+        self._btn_print_front.setStyleSheet(self._action_btn_style(False))
         self._btn_print_front.clicked.connect(lambda: self._open_side_pdf("frente"))
         action_bar.addWidget(self._btn_print_front)
 
         # Abrir Vuelta (abre el PDF de vueltas guardado en el visor del sistema)
         self._btn_print_back = QPushButton()
-        self._btn_print_back.setIcon(qta.icon("fa5s.external-link-alt", color="#FFFFFF"))
+        self._btn_print_back.setIcon(qta.icon("fa5s.external-link-alt", color=TEXT_DARK))
         self._btn_print_back.setIconSize(QSize(16, 16))
         self._btn_print_back.setText("  Abrir Vuelta")
         self._btn_print_back.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self._btn_print_back.setStyleSheet(self._action_btn_style(True))
+        self._btn_print_back.setStyleSheet(self._action_btn_style(False))
         self._btn_print_back.clicked.connect(lambda: self._open_side_pdf("vuelta"))
         action_bar.addWidget(self._btn_print_back)
 
@@ -612,9 +619,11 @@ class PrintCenter(QWidget):
                 self._detail_header.setText(f"📋 {cola.nombre}")
                 estado = cola.estado_label
                 fecha = cola.created_at.strftime("%d/%m/%Y %H:%M") if cola.created_at else ""
+                perfil = cola.perfil_posicion or "—"
                 self._detail_info.setText(
                     f"🏫 {escuela}  •  Estado: {estado}  •  "
-                    f"Registros: {cola.total_registros}  •  Creada: {fecha}"
+                    f"Registros: {cola.total_registros}  •  "
+                    f"Perfil: {perfil}  •  Creada: {fecha}"
                 )
 
                 # Cargar ítems
@@ -782,14 +791,19 @@ class PrintCenter(QWidget):
         )
         self.refresh_queues(keep_selection=True)
 
-    def _update_queue_pdfs(self) -> None:
-        """Regenera los PDFs de la cola con la configuración vigente de su plantilla.
+    def _update_queue_pdfs(self, perfil_name: str | None = None,
+                           then_print: bool = False) -> None:
+        """Regenera los PDFs de la cola con el perfil de posición seleccionado.
 
         Borra los PDFs anteriores del disco, renumera el orden de los ítems
         (1..n, por si se quitaron registros) y vuelve a renderizar en segundo
         plano con la plantilla que la cola tiene guardada — que es la de la
-        escuela y ya incluye los cambios hechos en el editor. El estado de la
-        cola no se modifica.
+        escuela y ya incluye los cambios hechos en el editor. Usa el perfil
+        indicado (o el elegido en el toolbar) y lo guarda en ``perfil_posicion``.
+        El estado de la cola no se modifica.
+
+        ``then_print`` imprime la cola tras regenerar (flujo de "regenerar con
+        el perfil de la impresora" antes de imprimir).
         """
         if not self._selected_cola_id:
             self.set_status("⚠️ Selecciona una cola primero", "warning")
@@ -798,19 +812,26 @@ class PrintCenter(QWidget):
             self.set_status("⏳ Ya hay una generación en curso...", "warning", toast=False)
             return
 
+        from credencializacion.core.settings import AppSettings
         from credencializacion.db.engine import DatabaseSession
         from credencializacion.db.models import ColaImpresion, ItemCola
 
         cola_id = self._selected_cola_id
 
-        reply = QMessageBox.question(
-            self,
-            "Actualizar PDFs",
-            "Se eliminarán los PDFs actuales y se regenerarán con la "
-            "configuración vigente de la plantilla.\n\n¿Continuar?",
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
+        perfil_name = perfil_name or self._selected_profile_name()
+        perfil = AppSettings.get_position_profile(perfil_name) if perfil_name else None
+
+        if not then_print:
+            reply = QMessageBox.question(
+                self,
+                "Actualizar PDFs",
+                "Se eliminarán los PDFs actuales y se regenerarán con la "
+                "configuración vigente de la plantilla"
+                + (f" y el perfil «{perfil_name}»" if perfil_name else "")
+                + ".\n\n¿Continuar?",
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
 
         try:
             with DatabaseSession() as session:
@@ -839,6 +860,8 @@ class PrintCenter(QWidget):
                         Path(pdf).unlink(missing_ok=True)
                 cola.pdf_frente_path = None
                 cola.pdf_vuelta_path = None
+                if perfil_name:
+                    cola.perfil_posicion = perfil_name
 
                 record_ids = [it.registro_id for it in items]
                 plantilla_id = items[0].plantilla_id
@@ -849,14 +872,18 @@ class PrintCenter(QWidget):
 
         from credencializacion.utils.paths import get_cola_pdf_dir
 
+        msg = "✅ PDFs actualizados" + (
+            f" con el perfil «{perfil_name}»" if perfil_name else " con la plantilla vigente"
+        )
         self.set_status("🔄 Actualizando PDFs de la cola...", "info", toast=False)
         self._start_render(
             record_ids,
             plantilla_id,
             str(get_cola_pdf_dir(cola_id)),
             lambda f, v: self._on_queue_pdfs_ready(
-                cola_id, f, v, "✅ PDFs actualizados con la plantilla vigente"
+                cola_id, f, v, msg, then_print=then_print
             ),
+            perfil=perfil,
         )
 
     def _copy_selected_queue(self) -> None:
@@ -958,9 +985,16 @@ class PrintCenter(QWidget):
         )
 
     def _on_queue_pdfs_ready(
-        self, cola_id: int, frentes_pdf: str, vueltas_pdf: str, mensaje: str
+        self, cola_id: int, frentes_pdf: str, vueltas_pdf: str, mensaje: str,
+        then_print: bool = False,
     ) -> None:
-        """Guarda las rutas de los PDFs regenerados y refresca la vista."""
+        """Guarda las rutas de los PDFs regenerados y refresca la vista.
+
+        Con ``then_print`` imprime la cara pendiente tras regenerar (flujo de
+        "regenerar con el perfil de la impresora antes de imprimir").
+        """
+        from pathlib import Path
+        from credencializacion.core.printer import print_pdf
         from credencializacion.db.engine import DatabaseSession
         from credencializacion.db.models import ColaImpresion
 
@@ -978,18 +1012,33 @@ class PrintCenter(QWidget):
         self.set_status(mensaje, "success")
         self.refresh_queues(keep_selection=True)
 
+        if then_print:
+            cara, printer = getattr(self, "_pending_print", (None, None))
+            self._pending_print = (None, None)
+            if cara and printer:
+                pdf = frentes_pdf if cara == "frente" else vueltas_pdf
+                if pdf and Path(pdf).exists() and print_pdf(Path(pdf), printer):
+                    self.set_status(f"🖨 Enviado {cara} a «{printer}».", "success")
+                else:
+                    self.set_status(
+                        f"❌ No se pudo enviar el {cara} a «{printer}».", "error",
+                    )
+
     # ── Render en segundo plano ─────────────────────────────────────
 
-    def _start_render(self, record_ids, plantilla_id, out_dir, on_done) -> None:
+    def _start_render(self, record_ids, plantilla_id, out_dir, on_done, perfil=None) -> None:
         """Lanza un ``QueueRenderWorker`` y enruta sus señales.
 
         ``on_done`` se invoca en el hilo principal con (frentes_pdf,
-        vueltas_pdf) cuando el render termina correctamente.
+        vueltas_pdf) cuando el render termina correctamente. ``perfil`` es el
+        dict de calibración de posición con el que renderizar (por impresora).
         """
         from credencializacion.ui.render_worker import QueueRenderWorker
 
         self._render_on_done = on_done
-        self._render_worker = QueueRenderWorker(record_ids, plantilla_id, out_dir)
+        self._render_worker = QueueRenderWorker(
+            record_ids, plantilla_id, out_dir, perfil=perfil
+        )
         self._render_worker.progress.connect(
             lambda m: self.set_status(m, "info", toast=False)
         )
@@ -1039,8 +1088,99 @@ class PrintCenter(QWidget):
         self._set_render_buttons_enabled(True)
 
     def _set_render_buttons_enabled(self, enabled: bool) -> None:
-        self._btn_update_pdfs.setEnabled(enabled)
-        self._btn_copy_queue.setEnabled(enabled)
+        # Actualizar/Copiar viven en el toolbar (inyectados por MainWindow).
+        for attr in ("_tb_btn_update", "_tb_btn_copy"):
+            btn = getattr(self, attr, None)
+            if btn is not None:
+                btn.setEnabled(enabled)
+        self._btn_send_front.setEnabled(enabled)
+        self._btn_send_back.setEnabled(enabled)
+
+    # ── Perfil / impresora seleccionados en el toolbar ──────────────
+
+    def _selected_printer(self) -> str:
+        """Impresora elegida en el toolbar (cadena vacía si ninguna)."""
+        cb = getattr(self, "cb_printer", None)
+        if cb is None:
+            return ""
+        return str(cb.currentData() or "")
+
+    def _selected_profile_name(self) -> str:
+        """Nombre del perfil de posición elegido en el toolbar."""
+        cb = getattr(self, "cb_profile", None)
+        if cb is None:
+            return ""
+        return str(cb.currentData() or "")
+
+    def _selected_profile(self) -> dict | None:
+        """Dict del perfil de posición elegido en el toolbar, o None."""
+        from credencializacion.core.settings import AppSettings
+        name = self._selected_profile_name()
+        return AppSettings.get_position_profile(name) if name else None
+
+    def _print_side(self, cara: str) -> None:
+        """Envía el PDF de una cara directo a la impresora seleccionada.
+
+        Si la impresora tiene asociado un perfil de posición distinto al que
+        se usó para generar la cola, ofrece regenerar los PDFs con el perfil
+        correcto antes de imprimir (evita imprimir con otra calibración).
+        """
+        from pathlib import Path
+        from credencializacion.core.settings import AppSettings
+        from credencializacion.core.printer import print_pdf
+        from credencializacion.db.engine import DatabaseSession
+        from credencializacion.db.models import ColaImpresion
+
+        if not self._selected_cola_id:
+            self.set_status("⚠️ Selecciona una cola primero", "warning")
+            return
+        printer = self._selected_printer()
+        if not printer:
+            self.set_status(
+                "⚠️ Selecciona una impresora en el toolbar antes de imprimir.",
+                "warning",
+            )
+            return
+
+        with DatabaseSession() as session:
+            cola = session.query(ColaImpresion).get(self._selected_cola_id)
+            if cola is None:
+                self.set_status("⚠️ Cola no encontrada", "warning")
+                return
+            pdf_path = cola.pdf_frente_path if cara == "frente" else cola.pdf_vuelta_path
+            perfil_cola = cola.perfil_posicion or ""
+
+        # Req 5: si la impresora tiene un perfil distinto al de la cola, ofrecer
+        # regenerar con el perfil de esa impresora antes de imprimir.
+        perfil_impresora = AppSettings.get_profile_for_printer(printer)
+        if perfil_impresora and perfil_impresora != perfil_cola:
+            resp = QMessageBox.question(
+                self, "Perfil distinto",
+                f"La cola se generó con el perfil «{perfil_cola or '—'}» pero la "
+                f"impresora «{printer}» usa el perfil «{perfil_impresora}».\n\n"
+                "¿Regenerar los PDFs con el perfil de la impresora antes de "
+                "imprimir?",
+            )
+            if resp == QMessageBox.StandardButton.Yes:
+                self._regenerate_then_print(perfil_impresora, cara, printer)
+                return
+
+        if not pdf_path or not Path(pdf_path).exists():
+            self.set_status(
+                f"⚠️ No hay PDF de {cara} guardado para esta cola.", "warning",
+            )
+            return
+        if print_pdf(Path(pdf_path), printer):
+            self.set_status(f"🖨 Enviado {cara} a «{printer}».", "success")
+        else:
+            self.set_status(
+                f"❌ No se pudo enviar el {cara} a «{printer}».", "error",
+            )
+
+    def _regenerate_then_print(self, perfil_name: str, cara: str, printer: str) -> None:
+        """Regenera los PDFs de la cola con un perfil y luego imprime la cara."""
+        self._pending_print = (cara, printer)
+        self._update_queue_pdfs(perfil_name=perfil_name, then_print=True)
 
     def _open_side_pdf(self, cara: str) -> None:
         """Abre el PDF guardado (frente o vuelta) de la cola en el visor del SO."""

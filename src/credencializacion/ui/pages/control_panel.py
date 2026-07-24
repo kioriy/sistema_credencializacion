@@ -294,6 +294,10 @@ class ControlPanel(QWidget):
         self._photo_cache: dict[str, QPixmap] = {}  # url -> pixmap circular
         self._raw_photo_cache: dict[str, QPixmap] = {} # url -> pixmap original
         self._pending_photos: dict[int, str] = {}  # reply_id -> url
+        # Footer de dos segmentos (mensaje | progreso de fotos) y prefetch.
+        self._main_status: str = ""
+        self._photo_status: str = ""
+        self._prefetch_worker = None
         self._setup_ui()
         self._connect_signals()
         self._render_worker = None
@@ -736,6 +740,9 @@ class ControlPanel(QWidget):
         self._current_page = 1
         self._update_status_counters()
         self._refresh_page()
+        # Prefetch en segundo plano de TODAS las fotos del cliente a disco,
+        # para que paginar sea instantáneo tras el llenado inicial.
+        self._start_photo_prefetch(records)
 
     def get_selected_records(self) -> list[int]:
         """Obtiene los IDs de los registros seleccionados.
@@ -1002,6 +1009,14 @@ class ControlPanel(QWidget):
         from credencializacion.db.engine import DatabaseSession
         from credencializacion.db.models import ColaImpresion, ItemCola
 
+        # Perfil de posición por defecto para la cola nueva (el primero
+        # disponible). Luego puede regenerarse con otro perfil desde el
+        # Centro de Impresión.
+        from credencializacion.core.settings import AppSettings
+        AppSettings.ensure_default_profile()
+        perfiles = AppSettings.list_position_profiles()
+        perfil_defecto = perfiles[0] if perfiles else None
+
         ids = [r.id for r in queue_records]
         try:
             with DatabaseSession() as session:
@@ -1009,6 +1024,7 @@ class ControlPanel(QWidget):
                 cola = ColaImpresion(
                     nombre=f"{plantilla_nombre} — {len(queue_records)} registros",
                     total_registros=len(queue_records),
+                    perfil_posicion=perfil_defecto,
                 )
                 session.add(cola)
                 session.flush()
@@ -1384,11 +1400,84 @@ class ControlPanel(QWidget):
                 border: none;
             }}
         """)
-        self._status_bar.setText(message)
+        # El footer tiene dos segmentos divididos por " | ": el mensaje
+        # (transitorio) y el progreso de fotos (persistente). Una notificación
+        # nueva solo reemplaza el mensaje, sin pisar el progreso de fotos.
+        self._main_status = message
+        self._render_footer()
         QCoreApplication.processEvents()
         # Toast notification (solo resultado final)
         if toast:
             ToastManager.instance().show_toast(message, level)
+
+    def _render_footer(self) -> None:
+        """Compone el footer: ``mensaje | progreso de fotos``."""
+        main = getattr(self, "_main_status", "") or ""
+        photo = getattr(self, "_photo_status", "") or ""
+        if photo:
+            self._status_bar.setText(f"{main}  |  {photo}" if main else photo)
+        else:
+            self._status_bar.setText(main)
+
+    def _set_photo_status(self, text: str) -> None:
+        """Actualiza solo el segmento de progreso de fotos del footer."""
+        self._photo_status = text
+        self._render_footer()
+
+    # ── Prefetch de fotos en segundo plano ──────────────────────────
+
+    def _start_photo_prefetch(self, records: list["Registro"]) -> None:
+        """Descarga a disco todas las fotos http del cliente (sin bloquear).
+
+        Reemplaza cualquier prefetch en curso (al cambiar de escuela). El
+        progreso se muestra en el segmento de fotos del footer.
+        """
+        from credencializacion.ui.photo_prefetch import PhotoPrefetchWorker
+
+        # Detener el prefetch anterior (otra escuela) y desconectar sus
+        # señales para que, mientras se drena, no altere el footer.
+        prev = getattr(self, "_prefetch_worker", None)
+        if prev is not None:
+            prev.stop()
+            try:
+                prev.progress.disconnect()
+                prev.finished_ok.disconnect()
+            except (RuntimeError, TypeError):
+                pass
+
+        urls = []
+        vistos = set()
+        for r in records:
+            u = r.photo_path
+            if u and u.startswith("http") and u not in vistos:
+                vistos.add(u)
+                urls.append(u)
+
+        if not urls:
+            self._set_photo_status("")
+            return
+
+        worker = PhotoPrefetchWorker(urls, self._photo_disk_path)
+        worker.progress.connect(self._on_prefetch_progress)
+        worker.finished_ok.connect(lambda w=worker: self._on_prefetch_done(w))
+        self._prefetch_worker = worker
+        worker.start()
+
+    def _on_prefetch_progress(self, done: int, total: int) -> None:
+        """Actualiza el segmento de fotos del footer con el avance."""
+        self._set_photo_status(f"📷 Fotos: {done}/{total}")
+
+    def _on_prefetch_done(self, worker) -> None:
+        """Al terminar: aplica las fotos ya cacheadas a la página visible y
+        limpia el segmento de progreso del footer."""
+        # Solo el worker vigente limpia el estado (evita que uno viejo, ya
+        # reemplazado, borre el progreso del actual).
+        if worker is not getattr(self, "_prefetch_worker", None):
+            return
+        self._set_photo_status("")
+        self._prefetch_worker = None
+        # Refrescar la página actual: las fotos que faltaban ya están en disco.
+        self._refresh_page()
 
     def _set_sync_enabled(self, enabled: bool) -> None:
         """Habilita/deshabilita el botón Sincronizar de la toolbar.
@@ -1734,58 +1823,63 @@ class ControlPanel(QWidget):
 
     @staticmethod
     def _make_placeholder(size: int = 32) -> QPixmap:
-        """Crea un pixmap circular gris como placeholder."""
-        from credencializacion.ui.widgets.record_table import BORDER as _BORDER
-        pixmap = QPixmap(size, size)
-        pixmap.fill(QColor(_BORDER))
-        result = QPixmap(size, size)
-        result.fill(QColor(0, 0, 0, 0))
-        painter = QPainter(result)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        path = QPainterPath()
-        path.addEllipse(0, 0, size, size)
-        painter.setClipPath(path)
-        painter.drawPixmap(0, 0, pixmap)
-        painter.end()
-        return result
+        """Crea un pixmap circular gris como placeholder (HiDPI-aware)."""
+        from credencializacion.ui.widgets.record_table import (
+            BORDER as _BORDER, make_circular_pixmap,
+        )
+        src = QPixmap(size, size)
+        src.fill(QColor(_BORDER))
+        return make_circular_pixmap(src, size)
 
     @staticmethod
     def _make_circular(source: QPixmap, size: int = 32) -> QPixmap:
-        """Recorta un pixmap en forma circular."""
-        scaled = source.scaled(
-            size, size,
-            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        if scaled.width() > size or scaled.height() > size:
-            x = (scaled.width() - size) // 2
-            y = (scaled.height() - size) // 2
-            scaled = scaled.copy(x, y, size, size)
+        """Recorta un pixmap en círculo (HiDPI-aware, ver record_table)."""
+        from credencializacion.ui.widgets.record_table import make_circular_pixmap
+        return make_circular_pixmap(source, size)
 
-        result = QPixmap(size, size)
-        result.fill(QColor(0, 0, 0, 0))
-        painter = QPainter(result)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        path = QPainterPath()
-        path.addEllipse(0, 0, size, size)
-        painter.setClipPath(path)
-        painter.drawPixmap(0, 0, scaled)
-        painter.end()
-        return result
+    @staticmethod
+    def _photo_disk_path(url: str) -> "Path":
+        """Ruta de caché en disco para una URL de foto (nombre = hash de la URL).
+
+        La caché persiste entre sesiones, así que las fotos no se re-descargan
+        cada vez: es la causa principal de la lentitud de carga.
+        """
+        import hashlib
+        from pathlib import Path
+        from credencializacion.utils.paths import get_image_cache_dir
+        nombre = hashlib.sha1(url.encode("utf-8")).hexdigest() + ".img"
+        return get_image_cache_dir() / nombre
+
+    def _cache_photo(self, url: str, pixmap: "QPixmap") -> None:
+        """Guarda el pixmap en memoria (raw + circular)."""
+        self._raw_photo_cache[url] = pixmap
+        self._photo_cache[url] = self._make_circular(pixmap, 32)
 
     def _download_visible_photos(self, page_records: list["Registro"]) -> None:
-        """Inicia descarga async de fotos de la página visible o aplica las cacheadas."""
+        """Aplica las fotos cacheadas (memoria/disco) o las descarga async."""
+        from pathlib import Path
+
         for row, rec in enumerate(page_records):
             url = rec.photo_path
             if not url or not url.startswith("http"):
                 # Si ya es un path local, RecordTable ya lo maneja
                 continue
 
+            # 1) Caché en memoria (misma sesión): instantáneo.
             if url in self._photo_cache:
-                # Aplicar foto desde la caché usando ID real
                 self._table.set_photo_by_id(rec.id, self._photo_cache[url])
                 continue
 
+            # 2) Caché en disco (sesiones previas): sin red.
+            disk = self._photo_disk_path(url)
+            if disk.exists():
+                pixmap = QPixmap()
+                if pixmap.load(str(disk)) and not pixmap.isNull():
+                    self._cache_photo(url, pixmap)
+                    self._table.set_photo_by_id(rec.id, self._photo_cache[url])
+                    continue
+
+            # 3) Descarga en red (una sola vez; luego queda en disco).
             request = QNetworkRequest(QUrl(url))
             reply = self._net_manager.get(request)
             reply.setProperty("row", row)
@@ -1795,22 +1889,23 @@ class ControlPanel(QWidget):
 
     def _on_photo_downloaded(self, reply: "QNetworkReply") -> None:
         """Callback cuando una foto termina de descargarse."""
-        row = reply.property("row")
         url = reply.property("photo_url")
         reg_id = reply.property("reg_id")
 
         if reply.error() == QNetworkReply.NetworkError.NoError:
-            data = reply.readAll()
+            raw = reply.readAll().data()
             pixmap = QPixmap()
-            pixmap.loadFromData(data.data())
+            pixmap.loadFromData(raw)
 
             if not pixmap.isNull():
-                self._raw_photo_cache[url] = pixmap
-                circular = self._make_circular(pixmap, 32)
-                self._photo_cache[url] = circular
-
-                # Actualizar el ícono en la tabla usando el ID (por si se reordenó)
-                self._table.set_photo_by_id(reg_id, circular)
+                self._cache_photo(url, pixmap)
+                # Persistir en disco para no re-descargar en el futuro.
+                try:
+                    self._photo_disk_path(url).write_bytes(raw)
+                except Exception:  # noqa: BLE001
+                    pass
+                # Actualizar el ícono usando el ID (por si se reordenó)
+                self._table.set_photo_by_id(reg_id, self._photo_cache[url])
 
         reply.deleteLater()
 

@@ -291,6 +291,9 @@ class ColaImpresion(Base):
     impresora: Mapped[str | None] = mapped_column(
         String(255), nullable=True
     )  # Nombre de la impresora del sistema asignada
+    perfil_posicion: Mapped[str | None] = mapped_column(
+        String(255), nullable=True
+    )  # Nombre del perfil de posición con el que se generaron los PDFs
     total_registros: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0
     )

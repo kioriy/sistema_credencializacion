@@ -153,17 +153,54 @@ class AddToQueueButton(QWidget):
         layout.addWidget(self.btn_add)
 
 
+def _screen_dpr() -> float:
+    """Device pixel ratio de la app (2.0 en pantallas Retina)."""
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance()
+    try:
+        return float(app.devicePixelRatio()) if app is not None else 1.0
+    except Exception:  # noqa: BLE001
+        return 1.0
+
+
+def make_circular_pixmap(source: QPixmap, size: int = PHOTO_SIZE) -> QPixmap:
+    """Recorta un pixmap en círculo, consciente de HiDPI (Retina).
+
+    El resultado se renderiza a ``size * dpr`` píxeles físicos y se marca con
+    ``devicePixelRatio``, de modo que ocupe ``size`` puntos lógicos completos
+    y no se dibuje a la mitad en pantallas Retina.
+    """
+    dpr = _screen_dpr()
+    px = max(1, round(size * dpr))  # tamaño en píxeles físicos
+
+    scaled = source.scaled(
+        px, px,
+        Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+        Qt.TransformationMode.SmoothTransformation,
+    )
+    if scaled.width() > px or scaled.height() > px:
+        x = (scaled.width() - px) // 2
+        y = (scaled.height() - px) // 2
+        scaled = scaled.copy(x, y, px, px)
+
+    result = QPixmap(px, px)
+    result.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(result)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    path_clip = QPainterPath()
+    path_clip.addEllipse(0, 0, px, px)
+    painter.setClipPath(path_clip)
+    painter.drawPixmap(0, 0, scaled)
+    painter.end()
+
+    result.setDevicePixelRatio(dpr)
+    return result
+
+
 def _create_circular_pixmap(path: str, size: int = PHOTO_SIZE) -> QPixmap:
-    """Crea un pixmap circular a partir de una ruta de imagen.
+    """Crea un pixmap circular a partir de una ruta de imagen (HiDPI-aware).
 
     Si la imagen no existe, devuelve un placeholder gris.
-
-    Args:
-        path: Ruta a la imagen.
-        size: Diámetro del círculo en píxeles.
-
-    Returns:
-        QPixmap circular.
     """
     from pathlib import Path as PathLib
 
@@ -171,36 +208,10 @@ def _create_circular_pixmap(path: str, size: int = PHOTO_SIZE) -> QPixmap:
     if path and PathLib(path).exists():
         source.load(path)
     else:
-        # Placeholder gris con silueta
         source = QPixmap(size, size)
         source.fill(QColor(BORDER))
 
-    # Escalar al tamaño deseado
-    source = source.scaled(
-        size, size,
-        Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-        Qt.TransformationMode.SmoothTransformation,
-    )
-
-    # Recortar al centro si es rectangular
-    if source.width() > size or source.height() > size:
-        x = (source.width() - size) // 2
-        y = (source.height() - size) // 2
-        source = source.copy(x, y, size, size)
-
-    # Aplicar máscara circular
-    result = QPixmap(size, size)
-    result.fill(Qt.GlobalColor.transparent)
-
-    painter = QPainter(result)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    path_clip = QPainterPath()
-    path_clip.addEllipse(0, 0, size, size)
-    painter.setClipPath(path_clip)
-    painter.drawPixmap(0, 0, source)
-    painter.end()
-
-    return result
+    return make_circular_pixmap(source, size)
 
 
 class RecordTable(QTableWidget):
@@ -241,6 +252,10 @@ class RecordTable(QTableWidget):
         header.setSectionResizeMode(COL_GRUPO, QHeaderView.ResizeMode.Fixed)
         header.setSectionResizeMode(COL_ESTADO, QHeaderView.ResizeMode.Fixed)
         header.setSectionResizeMode(COL_ACCION, QHeaderView.ResizeMode.Fixed)
+
+        # Tamaño explícito del icono de foto: sin esto el delegate usa el
+        # tamaño físico del pixmap y en Retina la miniatura se ve a la mitad.
+        self.setIconSize(QSize(PHOTO_SIZE, PHOTO_SIZE))
 
         self.setColumnWidth(COL_CHECK, 40)
         self.setColumnWidth(COL_PHOTO, 50)

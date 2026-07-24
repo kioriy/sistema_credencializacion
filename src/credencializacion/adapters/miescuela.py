@@ -324,6 +324,11 @@ class MiEscuelaAdapter(DataAdapter):
         for i, persona in enumerate(authorized, start=1):
             if not isinstance(persona, dict):
                 continue
+            # ID del autorizado con prefijo "A" (requisito del sistema de
+            # monitor): el API entrega `authorized_person_id` (ej. 2162) y se
+            # almacena como "A2162". Vacío si el API no trae el id.
+            aut_id = persona.get("authorized_person_id")
+            record[f"autorizado_{i}_id"] = f"A{aut_id}" if aut_id not in (None, "") else ""
             record[f"autorizado_{i}_nombre"] = persona.get("full_name", "") or ""
             record[f"autorizado_{i}_telefono"] = persona.get("phone", "") or ""
             record[f"autorizado_{i}_parentesco"] = persona.get("relationship", "") or ""

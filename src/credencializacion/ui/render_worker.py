@@ -29,11 +29,20 @@ class QueueRenderWorker(QThread):
     # hermano ya representado por otra credencial de la misma familia).
     omitidos = Signal(dict)
 
-    def __init__(self, record_ids: list[int], plantilla_id: int, out_dir: str) -> None:
+    def __init__(
+        self,
+        record_ids: list[int],
+        plantilla_id: int,
+        out_dir: str,
+        perfil: dict | None = None,
+    ) -> None:
         super().__init__()
         self._record_ids = list(record_ids)
         self._plantilla_id = plantilla_id
         self._out_dir = out_dir
+        # Perfil de posición (calibración por impresora). None = calibración
+        # global de QSettings.
+        self._perfil = perfil
 
     def run(self) -> None:  # noqa: D401
         try:
@@ -95,7 +104,7 @@ class QueueRenderWorker(QThread):
                         for reg, _ in render_items
                     ]
 
-                engine = PDFEngine(plantilla)
+                engine = PDFEngine(plantilla, perfil=self._perfil)
 
                 self.progress.emit("🖼 Generando PDF de frentes...")
                 frentes_pdf = engine.render_queue(
@@ -149,8 +158,8 @@ class QueueRenderWorker(QThread):
                     for reg, _ in descartados
                 ]
 
-        # 2. Fotos de hermanos: se agrupan por tutor TODOS los registros del
-        #    cliente, no solo los encolados.
+        # 2. Datos de hermanos (foto/nombre/grado/grupo): se agrupan por tutor
+        #    TODOS los registros del cliente, no solo los encolados.
         cliente_ids = {
             getattr(reg, "cliente_id", None) for reg, _ in render_items
         }
@@ -168,10 +177,10 @@ class QueueRenderWorker(QThread):
         # asignan siguiendo la disposición del diseño (izquierda→derecha,
         # arriba→abajo), no por el número del atributo. Evita el hueco cuando
         # el usuario coloca los slots en orden distinto al numérico.
-        slot_order = print_rules.template_sibling_slots_in_order(plantilla)
+        slot_order = print_rules.template_sibling_slot_order(plantilla)
 
         extras = [
-            print_rules.sibling_photo_extras(reg, grupos, slot_order)
+            print_rules.sibling_extras(reg, grupos, slot_order)
             for reg, _ in render_items
         ]
 

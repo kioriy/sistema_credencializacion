@@ -8,6 +8,7 @@ from credencializacion.renderer.coordinates import (
     mm_to_points,
     calculate_card_positions,
     calculate_card_positions_from_config,
+    calculate_card_positions_from_profile,
     final_coordinate,
 )
 from credencializacion.renderer.pdf_engine import PDFEngine
@@ -26,6 +27,7 @@ __all__ = [
     "mm_to_points",
     "calculate_card_positions",
     "calculate_card_positions_from_config",
+    "calculate_card_positions_from_profile",
     "final_coordinate",
     "apply_rotation",
     "restore_rotation",

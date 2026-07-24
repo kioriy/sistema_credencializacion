@@ -85,15 +85,53 @@ class ConfigPanel(QWidget):
         desc.setStyleSheet(f"color: {COLORS['text_light']}; font-size: 14px;")
         layout.addWidget(desc)
 
-        # Grupo: Orígenes de Impresión
-        print_group = QGroupBox("Calibración de Bandeja de Impresión (PVC)")
+        # Grupo: Perfiles de calibración (posiciones por impresora)
+        print_group = QGroupBox("Calibración de Bandeja de Impresión (PVC) — Perfiles")
         print_layout = QVBoxLayout(print_group)
-        
+
         help_text = self._make_help_label(
-            "Configura el punto de origen (X, Y) superior izquierdo para las dos ranuras de la charola de tu impresora.\nLos valores están en centímetros.",
-            lines=2,
+            "Cada perfil guarda la calibración de la charola (posición de las ranuras "
+            "y dimensiones) y la impresora a la que pertenece. Útil cuando varias "
+            "impresoras del mismo modelo difieren por unos píxeles. Los valores de "
+            "posición están en centímetros.",
+            lines=3,
         )
         print_layout.addWidget(help_text)
+
+        # Fila de gestión de perfiles
+        prof_row = QHBoxLayout()
+        prof_row.addWidget(QLabel("Perfil:"))
+        self.cb_profile = QComboBox()
+        self.cb_profile.setMinimumWidth(180)
+        self.cb_profile.currentIndexChanged.connect(self._on_profile_changed)
+        prof_row.addWidget(self.cb_profile)
+        prof_row.addSpacing(12)
+        prof_row.addWidget(QLabel("Nombre:"))
+        self.profile_name = QLineEdit()
+        self.profile_name.setPlaceholderText("Nombre del perfil")
+        prof_row.addWidget(self.profile_name)
+        btn_new_profile = QPushButton("Nuevo")
+        btn_new_profile.clicked.connect(self._new_profile)
+        prof_row.addWidget(btn_new_profile)
+        self.btn_delete_profile = QPushButton("Eliminar")
+        self.btn_delete_profile.clicked.connect(self._delete_profile)
+        prof_row.addWidget(self.btn_delete_profile)
+        print_layout.addLayout(prof_row)
+
+        # Impresora asociada al perfil
+        printer_row = QHBoxLayout()
+        printer_row.addWidget(QLabel("Impresora asociada:"))
+        self.cb_printer = QComboBox()
+        self.cb_printer.setMinimumWidth(260)
+        self._reload_printers()
+        printer_row.addWidget(self.cb_printer)
+        btn_reload_printers = QPushButton("Actualizar impresoras")
+        btn_reload_printers.clicked.connect(self._reload_printers)
+        printer_row.addWidget(btn_reload_printers)
+        printer_row.addStretch()
+        print_layout.addLayout(printer_row)
+
+        print_layout.addSpacing(8)
 
         # Ranura 1
         h1 = QHBoxLayout()
@@ -219,7 +257,10 @@ class ConfigPanel(QWidget):
         sp.setRange(-20.0, 50.0)
         sp.setDecimals(2)
         sp.setSingleStep(0.1)
-        sp.setFixedWidth(80)
+        # Ancho suficiente para valores con decimales (p. ej. "215.90",
+        # "1000.00") sin que el número quede recortado por los botones de
+        # incremento. Mínimo en vez de fijo para que pueda crecer.
+        sp.setMinimumWidth(120)
         return sp
 
     @staticmethod
@@ -242,34 +283,130 @@ class ConfigPanel(QWidget):
         return lbl
 
     def _load_settings(self) -> None:
-        (x1, y1), (x2, y2) = AppSettings.get_print_origins()
-        self.sp_x1.setValue(x1)
-        self.sp_y1.setValue(y1)
-        self.sp_x2.setValue(x2)
-        self.sp_y2.setValue(y2)
-        
-        w_mm, h_mm = AppSettings.get_page_dimensions()
-        self.sp_page_w.setValue(w_mm)
-        self.sp_page_h.setValue(h_mm)
-        
-        # Seleccionar combo apropiado
-        if abs(w_mm - 210.0) < 0.1 and abs(h_mm - 297.0) < 0.1:
-            self.cb_page_size.setCurrentIndex(0)
-            self._on_page_size_changed(0)
-        elif abs(w_mm - 215.9) < 0.1 and abs(h_mm - 279.4) < 0.1:
-            self.cb_page_size.setCurrentIndex(1)
-            self._on_page_size_changed(1)
-        elif abs(w_mm - 215.9) < 0.1 and abs(h_mm - 355.6) < 0.1:
-            self.cb_page_size.setCurrentIndex(2)
-            self._on_page_size_changed(2)
-        else:
-            self.cb_page_size.setCurrentIndex(3)
-            self._on_page_size_changed(3)
+        AppSettings.ensure_default_profile()
+        self._populate_profiles()  # carga el primer perfil en los campos
 
         cred_path = AppSettings.get_sheets_credentials_path()
         self.sheets_cred_input.setText(cred_path)
         self.sheets_doc_name_input.setText(AppSettings.get_sheets_document_name())
         self._refresh_service_email(cred_path)
+
+    # ── Perfiles de posición ────────────────────────────────────────
+
+    def _reload_printers(self) -> None:
+        """Repuebla el combo de impresoras del sistema, conservando la actual."""
+        actual = self.cb_printer.currentData() if self.cb_printer.count() else ""
+        try:
+            from credencializacion.core.printer import get_system_printers
+            impresoras = get_system_printers()
+        except Exception:  # noqa: BLE001
+            impresoras = []
+        self.cb_printer.blockSignals(True)
+        self.cb_printer.clear()
+        self.cb_printer.addItem("(sin asignar)", "")
+        for name in impresoras:
+            self.cb_printer.addItem(name, name)
+        # Restaurar selección previa aunque no esté en la lista del SO.
+        if actual:
+            idx = self.cb_printer.findData(actual)
+            if idx < 0:
+                self.cb_printer.addItem(actual, actual)
+                idx = self.cb_printer.count() - 1
+            self.cb_printer.setCurrentIndex(idx)
+        self.cb_printer.blockSignals(False)
+
+    def _populate_profiles(self, select: str | None = None) -> None:
+        """Llena el combo de perfiles y carga el seleccionado en los campos."""
+        nombres = AppSettings.list_position_profiles()
+        self.cb_profile.blockSignals(True)
+        self.cb_profile.clear()
+        for n in nombres:
+            self.cb_profile.addItem(n, n)
+        if select and select in nombres:
+            self.cb_profile.setCurrentIndex(self.cb_profile.findData(select))
+        self.cb_profile.blockSignals(False)
+        if self.cb_profile.count():
+            self._load_profile_into_fields(self.cb_profile.currentData())
+        # No permitir eliminar si solo queda un perfil.
+        self.btn_delete_profile.setEnabled(self.cb_profile.count() > 1)
+
+    def _on_profile_changed(self, _index: int) -> None:
+        name = self.cb_profile.currentData()
+        if name:
+            self._load_profile_into_fields(name)
+
+    def _load_profile_into_fields(self, name: str) -> None:
+        """Carga un perfil en los spinboxes, nombre, impresora y combo de tamaño."""
+        prof = AppSettings.get_position_profile(name)
+        if prof is None:
+            return
+        self.profile_name.setText(name)
+        self.sp_x1.setValue(float(prof.get("slot1_x", 0.0)))
+        self.sp_y1.setValue(float(prof.get("slot1_y", 0.0)))
+        self.sp_x2.setValue(float(prof.get("slot2_x", 0.0)))
+        self.sp_y2.setValue(float(prof.get("slot2_y", 5.4)))
+
+        w_mm = float(prof.get("page_width", 297.0))
+        h_mm = float(prof.get("page_height", 320.0))
+        self.sp_page_w.setValue(w_mm)
+        self.sp_page_h.setValue(h_mm)
+        self._apply_page_combo(w_mm, h_mm)
+
+        printer = str(prof.get("printer", "") or "")
+        idx = self.cb_printer.findData(printer)
+        if idx < 0 and printer:
+            self.cb_printer.addItem(printer, printer)
+            idx = self.cb_printer.count() - 1
+        self.cb_printer.setCurrentIndex(idx if idx >= 0 else 0)
+
+    def _apply_page_combo(self, w_mm: float, h_mm: float) -> None:
+        """Selecciona el combo de tamaño de hoja según las dimensiones."""
+        if abs(w_mm - 210.0) < 0.1 and abs(h_mm - 297.0) < 0.1:
+            self.cb_page_size.setCurrentIndex(0); self._on_page_size_changed(0)
+        elif abs(w_mm - 215.9) < 0.1 and abs(h_mm - 279.4) < 0.1:
+            self.cb_page_size.setCurrentIndex(1); self._on_page_size_changed(1)
+        elif abs(w_mm - 215.9) < 0.1 and abs(h_mm - 355.6) < 0.1:
+            self.cb_page_size.setCurrentIndex(2); self._on_page_size_changed(2)
+        else:
+            self.cb_page_size.setCurrentIndex(3); self._on_page_size_changed(3)
+
+    def _fields_to_profile_data(self) -> dict:
+        """Construye el dict de perfil desde los valores de los campos."""
+        return {
+            "slot1_x": self.sp_x1.value(), "slot1_y": self.sp_y1.value(),
+            "slot2_x": self.sp_x2.value(), "slot2_y": self.sp_y2.value(),
+            "page_width": self.sp_page_w.value(),
+            "page_height": self.sp_page_h.value(),
+            "printer": self.cb_printer.currentData() or "",
+        }
+
+    def _new_profile(self) -> None:
+        """Crea un perfil nuevo con los valores actuales de los campos."""
+        from PySide6.QtWidgets import QInputDialog
+        nombre, ok = QInputDialog.getText(self, "Nuevo perfil", "Nombre del perfil:")
+        nombre = (nombre or "").strip()
+        if not ok or not nombre:
+            return
+        if nombre in AppSettings.list_position_profiles():
+            QMessageBox.warning(self, "Perfil existente",
+                                f"Ya existe un perfil llamado «{nombre}».")
+            return
+        AppSettings.save_position_profile(nombre, self._fields_to_profile_data())
+        self._populate_profiles(select=nombre)
+
+    def _delete_profile(self) -> None:
+        name = self.cb_profile.currentData()
+        if not name:
+            return
+        if len(AppSettings.list_position_profiles()) <= 1:
+            QMessageBox.information(self, "Perfiles",
+                                   "Debe existir al menos un perfil.")
+            return
+        if QMessageBox.question(self, "Eliminar perfil",
+                                f"¿Eliminar el perfil «{name}»?") != QMessageBox.StandardButton.Yes:
+            return
+        AppSettings.delete_position_profile(name)
+        self._populate_profiles()
 
     def _browse_sheets_credentials(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -314,26 +451,37 @@ class ConfigPanel(QWidget):
             self.sp_page_h.setEnabled(True)
 
     def _save_settings(self) -> None:
+        # Guardar el perfil de posición seleccionado (con posible renombrado).
+        actual = self.cb_profile.currentData()
+        nuevo_nombre = self.profile_name.text().strip() or actual
+        data = self._fields_to_profile_data()
+        AppSettings.save_position_profile(nuevo_nombre, data)
+        # Si se renombró, eliminar el perfil anterior.
+        if actual and nuevo_nombre != actual:
+            AppSettings.delete_position_profile(actual)
+        # Mantener la calibración global sincronizada con el perfil guardado
+        # (fallback para código que aún lee los valores globales).
         AppSettings.set_print_origins(
-            self.sp_x1.value(), self.sp_y1.value(),
-            self.sp_x2.value(), self.sp_y2.value()
+            data["slot1_x"], data["slot1_y"], data["slot2_x"], data["slot2_y"]
         )
-        AppSettings.set_page_dimensions(self.sp_page_w.value(), self.sp_page_h.value())
+        AppSettings.set_page_dimensions(data["page_width"], data["page_height"])
+
         AppSettings.set_sheets_config(
             self.sheets_cred_input.text().strip(),
             self.sheets_doc_name_input.text().strip() or "clientes negocios",
         )
-        QMessageBox.information(self, "Configuración Guardada", "Los ajustes se guardaron correctamente en el sistema.")
+        self._populate_profiles(select=nuevo_nombre)
+        QMessageBox.information(self, "Configuración Guardada",
+                               f"Perfil «{nuevo_nombre}» y ajustes guardados.")
 
     def _reset_settings(self) -> None:
+        # Restablece los CAMPOS del perfil en edición (no guarda hasta pulsar
+        # Guardar). No toca los otros perfiles ni la configuración de Sheets.
         self.sp_x1.setValue(0.0)
         self.sp_y1.setValue(0.0)
         self.sp_x2.setValue(0.0)
         self.sp_y2.setValue(5.4)
-
         self.cb_page_size.setCurrentIndex(0)
         self._on_page_size_changed(0)
-
-        self.sheets_cred_input.setText("")
-        self.sheets_doc_name_input.setText("")
-        self.sheets_service_email.setText("—")
+        if self.cb_printer.count():
+            self.cb_printer.setCurrentIndex(0)

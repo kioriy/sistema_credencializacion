@@ -28,7 +28,7 @@ def init_database() -> None:
 
 
 def _add_cola_pdf_columns(engine) -> None:
-    """Agrega las columnas de rutas de PDF a `colas_impresion` si faltan.
+    """Agrega columnas nuevas a `colas_impresion` si faltan.
 
     ``create_all`` no altera tablas existentes, por lo que en bases de datos
     previas hay que añadir las columnas manualmente. Es idempotente.
@@ -37,16 +37,20 @@ def _add_cola_pdf_columns(engine) -> None:
     if "colas_impresion" not in set(inspector.get_table_names()):
         return
     existentes = {c["name"] for c in inspector.get_columns("colas_impresion")}
-    faltantes = [
-        col for col in ("pdf_frente_path", "pdf_vuelta_path") if col not in existentes
-    ]
+    # (columna, tipo SQL)
+    columnas = (
+        ("pdf_frente_path", "VARCHAR(500)"),
+        ("pdf_vuelta_path", "VARCHAR(500)"),
+        ("perfil_posicion", "VARCHAR(255)"),
+    )
+    faltantes = [(col, tipo) for col, tipo in columnas if col not in existentes]
     if not faltantes:
         return
     raw = engine.raw_connection()
     try:
         cur = raw.cursor()
-        for col in faltantes:
-            cur.execute(f"ALTER TABLE colas_impresion ADD COLUMN {col} VARCHAR(500)")
+        for col, tipo in faltantes:
+            cur.execute(f"ALTER TABLE colas_impresion ADD COLUMN {col} {tipo}")
         raw.commit()
         cur.close()
     finally:

@@ -85,12 +85,45 @@ def calculate_card_positions_from_config(
     """
     page_w, page_h = page_size
     origins = AppSettings.get_print_origins()
-    
+
     positions: list[tuple[float, float]] = []
     for origin in origins:
         x_cm, y_cm = origin
         x = cm_to_points(x_cm)
         # PDF origin is bottom-left; convert top-down y_cm to bottom-up
+        y = page_h - cm_to_points(y_cm)
+        positions.append((x, y))
+
+    return positions
+
+
+def calculate_card_positions_from_profile(
+    page_size: tuple[float, float],
+    profile: dict,
+) -> list[tuple[float, float]]:
+    """Calcula posiciones a partir de un perfil de posición explícito.
+
+    Igual que ``calculate_card_positions_from_config`` pero leyendo los
+    orígenes de las ranuras del ``profile`` (dict con ``slot1_x/y`` y
+    ``slot2_x/y`` en cm) en vez del QSettings global. Permite renderizar una
+    cola con la calibración de una impresora concreta.
+
+    Args:
+        page_size: (ancho, alto) de la página en puntos.
+        profile: Dict de perfil de posición.
+
+    Returns:
+        Lista de tuplas (x_pts, y_pts) en coordenadas PDF.
+    """
+    page_w, page_h = page_size
+    origins = (
+        (float(profile.get("slot1_x", 0.0)), float(profile.get("slot1_y", 0.0))),
+        (float(profile.get("slot2_x", 0.0)), float(profile.get("slot2_y", 5.4))),
+    )
+
+    positions: list[tuple[float, float]] = []
+    for x_cm, y_cm in origins:
+        x = cm_to_points(x_cm)
         y = page_h - cm_to_points(y_cm)
         positions.append((x, y))
 

@@ -25,6 +25,7 @@ from credencializacion.renderer.coordinates import (
     cm_to_points,
     mm_to_points,
     calculate_card_positions_from_config,
+    calculate_card_positions_from_profile,
     final_coordinate,
 )
 from credencializacion.services.text_rules import apply_text_rule
@@ -97,22 +98,34 @@ class PDFEngine:
 
     Args:
         plantilla: Modelo Plantilla con la definición del diseño.
+        perfil: Perfil de posición opcional (dict con ``slot*``/``page_*``).
+            Si se indica, la charola usa esa calibración (por impresora); si
+            es ``None``, se usa la calibración global de QSettings.
     """
 
-    def __init__(self, plantilla: "Plantilla") -> None:
+    def __init__(self, plantilla: "Plantilla", perfil: dict | None = None) -> None:
         self.plantilla = plantilla
-        
+
         from credencializacion.core.settings import AppSettings
         from credencializacion.renderer.coordinates import mm_to_points
-        w_mm, h_mm = AppSettings.get_page_dimensions()
-        self._page_size = (mm_to_points(w_mm), mm_to_points(h_mm))
+
         self._cards_per_page = (plantilla.posiciones_hoja or {}).get(
             "cards_per_page", 2
         )
-        self._card_positions = calculate_card_positions_from_config(
-            self._page_size,
-            plantilla.posiciones_hoja or {},
-        )
+        if perfil:
+            w_mm = float(perfil.get("page_width", 297.0))
+            h_mm = float(perfil.get("page_height", 320.0))
+            self._page_size = (mm_to_points(w_mm), mm_to_points(h_mm))
+            self._card_positions = calculate_card_positions_from_profile(
+                self._page_size, perfil,
+            )
+        else:
+            w_mm, h_mm = AppSettings.get_page_dimensions()
+            self._page_size = (mm_to_points(w_mm), mm_to_points(h_mm))
+            self._card_positions = calculate_card_positions_from_config(
+                self._page_size,
+                plantilla.posiciones_hoja or {},
+            )
         self._rotate = should_rotate(plantilla)
 
     def render(
