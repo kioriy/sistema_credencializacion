@@ -229,7 +229,7 @@ def get_temp_dir() -> Path:
     return temp
 
 
-def get_plantilla_base_dir() -> Path:
+def get_plantilla_base_dir(cliente_id: int | None = None) -> Path:
     """Directorio donde se guardan las imágenes base de las plantillas.
 
     - Desarrollo: ``<raíz del proyecto>/plantilla_base`` (comportamiento previo).
@@ -237,14 +237,61 @@ def get_plantilla_base_dir() -> Path:
       directorio de la app, para que las actualizaciones no borren las imágenes
       base subidas por el usuario.
 
+    Si se indica ``cliente_id`` se devuelve la subcarpeta ``.../cliente_<id>``,
+    que AÍSLA las imágenes base por escuela: dos clientes distintos ya no pueden
+    pisar el archivo del otro por compartir el mismo nombre de archivo (bug de
+    sobrescritura entre escuelas). Sin ``cliente_id`` se devuelve la raíz plana
+    (ubicación legada/semilla, solo para migración y compatibilidad).
+
     Crea el directorio si no existe (primera ejecución/actualización).
     """
     if _is_frozen():
         d = get_data_dir() / "plantilla_base"
     else:
         d = get_app_root() / "plantilla_base"
+    if cliente_id is not None:
+        d = d / f"cliente_{cliente_id}"
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def _same_file_content(a: Path, b: Path) -> bool:
+    """True si dos archivos existen y tienen contenido byte a byte idéntico."""
+    import filecmp
+
+    try:
+        return a.exists() and b.exists() and filecmp.cmp(a, b, shallow=False)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def resolve_nonclobber_dest(dest_folder: Path, src: Path) -> Path:
+    """Ruta destino dentro de ``dest_folder`` que NO sobrescribe un archivo distinto.
+
+    Evita el bug de sobrescritura: si ya existe un archivo con el mismo nombre
+    pero contenido diferente, se genera ``nombre (2).ext``, ``nombre (3).ext``…
+    hasta encontrar un hueco. Si ya existe uno con contenido idéntico, se
+    reutiliza esa ruta (no se duplica). El llamador solo copia si ``src`` y el
+    destino no son ya el mismo archivo.
+    """
+    dest = dest_folder / src.name
+    if not dest.exists():
+        return dest
+    try:
+        if src.resolve() == dest.resolve():
+            return dest
+    except Exception:  # noqa: BLE001
+        pass
+    if _same_file_content(src, dest):
+        return dest
+
+    stem, suffix = dest.stem, dest.suffix
+    i = 2
+    while True:
+        cand = dest_folder / f"{stem} ({i}){suffix}"
+        if not cand.exists() or _same_file_content(src, cand):
+            return cand
+        i += 1
 
 
 def get_bundled_plantilla_base() -> Path | None:

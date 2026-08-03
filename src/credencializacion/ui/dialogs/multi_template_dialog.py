@@ -420,12 +420,17 @@ class MultiTemplateDialog(QDialog):
     def _copy_image(self, path_str: str) -> Path | None:
         """Copia la imagen a la carpeta estable de plantilla_base."""
         import shutil
-        from credencializacion.utils.paths import get_plantilla_base_dir
+        from credencializacion.utils.paths import (
+            get_plantilla_base_dir,
+            resolve_nonclobber_dest,
+        )
 
         src = Path(path_str)
-        dest_folder = get_plantilla_base_dir()
-        dest = dest_folder / src.name
-        if src.resolve() != dest.resolve():
+        # Aislar por escuela y no sobrescribir un archivo distinto con el mismo
+        # nombre (bug de sobrescritura entre escuelas).
+        dest_folder = get_plantilla_base_dir(self.cliente_id)
+        dest = resolve_nonclobber_dest(dest_folder, src)
+        if src.resolve() != dest.resolve() and not dest.exists():
             try:
                 shutil.copy2(src, dest)
             except Exception as e:  # noqa: BLE001

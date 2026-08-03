@@ -445,7 +445,11 @@ class TemplateManager(QWidget):
         reply = QMessageBox.question(
             self,
             "Confirmar copia",
-            f"\u00bfCopiar \u00ab{nombre}\u00bb al cliente \u00ab{self._combo_dest.currentText()}\u00bb?",
+            f"\u00bfCopiar \u00ab{nombre}\u00bb al cliente "
+            f"\u00ab{self._combo_dest.currentText()}\u00bb?\n\n"
+            "La imagen base (plantilla base) NO se copia: cada escuela debe "
+            "cargar la suya desde el editor para que no compartan el mismo "
+            "archivo de fondo.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
@@ -469,18 +473,47 @@ class TemplateManager(QWidget):
                 orientacion=original.orientacion,
                 ancho=original.ancho,
                 alto=original.alto,
-                elementos_frente=copy.deepcopy(original.elementos_frente),
-                elementos_vuelta=copy.deepcopy(original.elementos_vuelta),
+                # Se omite la imagen base al copiar: las rutas de fondo apuntan a
+                # archivos por escuela y compartirlas hacia que editar/subir el
+                # fondo de una escuela pisara el de otras. El usuario recarga la
+                # plantilla base en el editor para cada copia.
+                elementos_frente=self._strip_base_images(original.elementos_frente),
+                elementos_vuelta=self._strip_base_images(original.elementos_vuelta),
                 posiciones_hoja=copy.deepcopy(original.posiciones_hoja),
-                recursos=copy.deepcopy(original.recursos),
+                recursos=self._strip_fondo(original.recursos),
             )
             session.add(nueva)
             session.commit()
 
         dest_name = self._combo_dest.currentText()
         self.set_status(
-            f"\u2705 \u00ab{nombre}\u00bb copiada a \u00ab{dest_name}\u00bb correctamente.", "success"
+            f"\u2705 \u00ab{nombre}\u00bb copiada a \u00ab{dest_name}\u00bb. "
+            "Carga su plantilla base en el editor.", "success"
         )
+
+    @staticmethod
+    def _strip_base_images(elementos: list | None) -> list:
+        """Copia los elementos omitiendo el elemento de imagen base (fondo).
+
+        El fondo se reasigna por escuela en el editor; copiarlo haria que el
+        diseno destino apuntara al archivo de fondo de la escuela origen.
+        """
+        import copy
+        return [
+            copy.deepcopy(e)
+            for e in (elementos or [])
+            if not (isinstance(e, dict) and e.get("type") == "base_image")
+        ]
+
+    @staticmethod
+    def _strip_fondo(recursos: dict | None) -> dict:
+        """Copia los recursos omitiendo las rutas de imagen base por lado."""
+        import copy
+        return {
+            k: copy.deepcopy(v)
+            for k, v in (recursos or {}).items()
+            if k not in ("fondo_frente", "fondo_vuelta")
+        }
 
     # ── Status bar ─────────────────────────────────────────────────
 

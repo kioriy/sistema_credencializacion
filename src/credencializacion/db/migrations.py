@@ -25,6 +25,7 @@ def init_database() -> None:
     _drop_legacy_multiplantillaje(engine)
     _add_cola_pdf_columns(engine)
     _migrate_plantilla_base()
+    _migrate_plantilla_base_por_cliente()
 
 
 def _add_cola_pdf_columns(engine) -> None:
@@ -171,6 +172,93 @@ def _migrate_plantilla_base() -> None:
                     flag_modified(plantilla, "recursos")
     except Exception:  # noqa: BLE001
         # La migración de rutas es best-effort; no debe impedir el arranque.
+        pass
+
+
+def _migrate_plantilla_base_por_cliente() -> None:
+    """Aísla las imágenes base por escuela (subcarpeta ``plantilla_base/cliente_<id>``).
+
+    Corrige el bug de sobrescritura entre escuelas: antes todas las imágenes base
+    vivían en una única carpeta plana nombradas solo por su nombre de archivo, así
+    que dos escuelas con un fondo del mismo nombre compartían el mismo archivo
+    físico y editar/subir el de una pisaba el de las otras.
+
+    Por cada plantilla, copia su imagen base (``recursos['fondo_frente'/'fondo_vuelta']``)
+    a la subcarpeta de SU cliente y reescribe la ruta (recursos y el ``src`` del
+    elemento ``base_image`` en ``elementos_*``). No sobrescribe archivos distintos
+    (usa ``resolve_nonclobber_dest``). Es idempotente: si la ruta ya apunta a la
+    subcarpeta del cliente, no hace nada. Best-effort: nunca impide el arranque.
+    """
+    import shutil
+    from pathlib import Path
+
+    from sqlalchemy.orm.attributes import flag_modified
+
+    from credencializacion.db.models import Plantilla
+    from credencializacion.utils.paths import (
+        get_plantilla_base_dir,
+        resolve_nonclobber_dest,
+    )
+
+    def _relocate(old: str, dest_dir: Path) -> str | None:
+        """Devuelve la nueva ruta dentro de ``dest_dir`` o ``None`` si no cambia."""
+        if not old:
+            return None
+        op = Path(old)
+        try:
+            # Ya está aislada en la carpeta de este cliente: nada que hacer.
+            if op.parent.resolve() == dest_dir.resolve():
+                return None
+        except Exception:  # noqa: BLE001
+            return None
+        if not op.exists():
+            return None
+        target = resolve_nonclobber_dest(dest_dir, op)
+        if not target.exists():
+            try:
+                shutil.copy2(op, target)
+            except Exception:  # noqa: BLE001
+                return None
+        return str(target)
+
+    try:
+        with DatabaseSession() as session:
+            for plantilla in session.query(Plantilla).all():
+                dest_dir = get_plantilla_base_dir(plantilla.cliente_id)
+                recursos = dict(plantilla.recursos or {})
+                # nombre de archivo viejo -> nombre nuevo, para reescribir elementos.
+                remap: dict[str, str] = {}
+                changed = False
+
+                for key in ("fondo_frente", "fondo_vuelta"):
+                    new = _relocate(recursos.get(key, ""), dest_dir)
+                    if new:
+                        remap[recursos[key]] = new
+                        recursos[key] = new
+                        changed = True
+
+                if changed:
+                    plantilla.recursos = recursos
+                    flag_modified(plantilla, "recursos")
+
+                # Reescribir el src del elemento base_image en ambos lados.
+                for attr in ("elementos_frente", "elementos_vuelta"):
+                    elementos = getattr(plantilla, attr) or []
+                    lado_changed = False
+                    for elem in elementos:
+                        if not isinstance(elem, dict) or elem.get("type") != "base_image":
+                            continue
+                        props = elem.get("properties") or {}
+                        src = props.get("src")
+                        if src in remap:
+                            props["src"] = remap[src]
+                            elem["properties"] = props
+                            lado_changed = True
+                    if lado_changed:
+                        setattr(plantilla, attr, elementos)
+                        flag_modified(plantilla, attr)
+    except Exception:  # noqa: BLE001
+        # Best-effort: la reubicación no debe impedir el arranque.
         pass
 
 

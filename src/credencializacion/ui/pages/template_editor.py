@@ -1772,14 +1772,21 @@ class TemplateEditor(QWidget):
         """
         from pathlib import Path
         import shutil
-        from credencializacion.utils.paths import get_plantilla_base_dir
+        from credencializacion.utils.paths import (
+            get_plantilla_base_dir,
+            resolve_nonclobber_dest,
+        )
 
         src = Path(path_str)
-        dest_folder = get_plantilla_base_dir()  # crea el directorio si no existe
-        dest_folder.mkdir(parents=True, exist_ok=True)
-        dest = dest_folder / src.name
+        # Aislar por escuela: la imagen base se guarda en la subcarpeta del
+        # cliente para que subir un fondo con un nombre repetido no pise el de
+        # otra escuela. Si la plantilla aún no está guardada, cae a la raíz.
+        cliente_id = getattr(self._plantilla, "cliente_id", None) if self._plantilla else None
+        dest_folder = get_plantilla_base_dir(cliente_id)  # crea el directorio si no existe
+        # Nunca sobrescribir un archivo distinto con el mismo nombre.
+        dest = resolve_nonclobber_dest(dest_folder, src)
 
-        if src.resolve() != dest.resolve():
+        if src.resolve() != dest.resolve() and not dest.exists():
             try:
                 shutil.copy2(src, dest)
             except Exception as e:  # noqa: BLE001
