@@ -623,12 +623,32 @@ class ControlPanel(QWidget):
             active_bg="#7C3AED",
         ))
 
+        # Naranja, el mismo de la fila marcada en la tabla: la pill y el
+        # resaltado tienen que leerse como la misma señal.
+        self._pill_incidencias = QPushButton("⚠ Incidencias: 0")
+        self._pill_incidencias.setCheckable(True)
+        self._pill_incidencias.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._pill_incidencias.setToolTip(
+            "Alumnos con datos que conviene revisar antes de imprimir: CURP que "
+            "no concuerda con el nombre, CURP repetida o exceso de personas "
+            "autorizadas."
+        )
+        self._pill_incidencias.setStyleSheet(pill_base.format(
+            bg="#FFEDD5", fg="#9A3412", border="#FDBA74",
+            hover_border="#C2410C", hover_bg="#FED7AA",
+            active_bg="#C2410C",
+        ))
+        self._pill_incidencias.setVisible(False)  # solo si hay algo que revisar
+
         self._pill_all.clicked.connect(lambda: self._apply_status_filter(None))
         self._pill_with_photo.clicked.connect(lambda: self._apply_status_filter("con_foto"))
         self._pill_no_photo.clicked.connect(lambda: self._apply_status_filter("sin_foto"))
         self._pill_with_form.clicked.connect(lambda: self._apply_status_filter("con_formulario"))
         self._pill_no_form.clicked.connect(lambda: self._apply_status_filter("sin_formulario"))
         self._pill_siblings.clicked.connect(lambda: self._apply_status_filter("hermanos"))
+        self._pill_incidencias.clicked.connect(
+            lambda: self._apply_status_filter("incidencias")
+        )
 
         row.addWidget(self._pill_all)
         row.addWidget(self._pill_with_photo)
@@ -636,6 +656,7 @@ class ControlPanel(QWidget):
         row.addWidget(self._pill_with_form)
         row.addWidget(self._pill_no_form)
         row.addWidget(self._pill_siblings)
+        row.addWidget(self._pill_incidencias)
         row.addStretch()
 
         return row
@@ -724,6 +745,7 @@ class ControlPanel(QWidget):
         self._search_input.textChanged.connect(self._on_search_changed)
         self._combo_clients.currentIndexChanged.connect(self._on_client_selected)
         self._table.add_to_queue_clicked.connect(self._add_single_to_queue)
+        self._table.itemSelectionChanged.connect(self._on_selection_changed)
 
     # ── Métodos públicos ───────────────────────────────────────────
 
@@ -738,6 +760,10 @@ class ControlPanel(QWidget):
         self._active_status_filter = None
         self._total_records = len(records)
         self._current_page = 1
+        # Las incidencias se calculan una sola vez sobre el padrón completo,
+        # no por página: la pill cuenta sobre todo el cliente, y "CURP
+        # repetida" solo se puede detectar comparando registros entre sí.
+        self._incidencias_lote = self._analizar_incidencias(records)
         self._update_status_counters()
         self._refresh_page()
         # Prefetch en segundo plano de TODAS las fotos del cliente a disco,
@@ -946,6 +972,41 @@ class ControlPanel(QWidget):
         """Envía la cola en memoria al Centro de Impresión (genera y guarda PDFs)."""
         self._send_queue_to_print_center()
 
+    def _on_selection_changed(self) -> None:
+        """Resume en el footer las incidencias de lo que está seleccionado.
+
+        Solo escribe cuando hay algo que decir: con la selección vacía o sin
+        incidencias entre lo seleccionado, no pisa el mensaje que el footer ya
+        traía (resultado de una sincronización, por ejemplo).
+        """
+        from credencializacion.services.incidencias import resumir
+
+        seleccionados = self._table.get_selected_ids()
+        if not seleccionados:
+            return
+
+        hallazgos = [
+            inc for reg_id in seleccionados
+            for inc in self._table.incidencias_de(reg_id)
+        ]
+        if not hallazgos:
+            if self._table.total_con_incidencias:
+                self.set_status(
+                    f"{len(seleccionados)} seleccionado(s) · sin incidencias "
+                    f"({self._table.total_con_incidencias} en el padrón)",
+                    "info", toast=False,
+                )
+            return
+
+        afectados = sum(
+            1 for reg_id in seleccionados if self._table.incidencias_de(reg_id)
+        )
+        self.set_status(
+            f"⚠ {afectados} de {len(seleccionados)} seleccionado(s) requieren "
+            f"revisión: {resumir(hallazgos)}",
+            "warning", toast=False,
+        )
+
     def _add_single_to_queue(self, reg_id: int) -> None:
         """Agrega un único registro a la cola visual."""
         template_id = self._combo_templates.currentData()
@@ -984,6 +1045,70 @@ class ControlPanel(QWidget):
         if added > 0:
             self.set_status(f"✅ {added} registros agregados a la cola", "success")
 
+    def _confirmar_incidencias(self, registros: list) -> bool:
+        """Pide confirmación si la cola incluye registros con incidencias.
+
+        Es el último punto donde el error todavía sale barato: después de aquí
+        se generan los PDFs y se imprime. No bloquea —el operador puede tener
+        razones para imprimir de todas formas— pero obliga a verlo.
+
+        Returns:
+            True si se puede continuar; False si el operador canceló.
+        """
+        from credencializacion.services.incidencias import resumir
+
+        mapa = self._incidencias()
+        if not mapa:
+            return True
+
+        afectados = [r for r in registros if r.id in mapa]
+        if not afectados:
+            return True
+
+        hallazgos = [inc for r in afectados for inc in mapa[r.id]]
+        detalle = "\n".join(
+            f"• {r.nombre_completo or r.enrollment_code}: "
+            + "; ".join(i.titulo for i in mapa[r.id])
+            for r in afectados
+        )
+
+        dialogo = QMessageBox(self)
+        dialogo.setIcon(QMessageBox.Icon.Warning)
+        dialogo.setWindowTitle("Registros con incidencias")
+        dialogo.setText(
+            f"<b>{len(afectados)} de {len(registros)} credenciales de esta cola "
+            "tienen datos que conviene revisar.</b>"
+        )
+        dialogo.setInformativeText(
+            f"Se detectó: {resumir(hallazgos)}.\n\n"
+            "Una CURP que no concuerda suele ser la de un hermano filtrada al "
+            "expediente, así que la credencial saldría con el dato de otro "
+            "alumno."
+        )
+        dialogo.setDetailedText(detalle)
+
+        btn_imprimir = dialogo.addButton(
+            "Imprimir de todas formas", QMessageBox.ButtonRole.DestructiveRole,
+        )
+        btn_revisar = dialogo.addButton(
+            "Revisar primero", QMessageBox.ButtonRole.RejectRole,
+        )
+        dialogo.setDefaultButton(btn_revisar)
+        dialogo.exec()
+
+        if dialogo.clickedButton() is btn_imprimir:
+            return True
+
+        # "Revisar primero" deja el filtro puesto en las incidencias, para que
+        # el operador caiga directamente en los registros que debe mirar.
+        self._apply_status_filter("incidencias")
+        self.set_status(
+            f"⚠ {len(afectados)} registro(s) de la cola requieren revisión: "
+            f"{resumir(hallazgos)}",
+            "warning", toast=False,
+        )
+        return False
+
     def _send_queue_to_print_center(self) -> None:
         """Crea la cola en BD y genera/guarda sus PDFs sin bloquear la app.
 
@@ -1000,6 +1125,9 @@ class ControlPanel(QWidget):
         plantilla_id = self._combo_templates.currentData()
         if not plantilla_id:
             self.set_status("⚠️ Selecciona una plantilla", "warning")
+            return
+
+        if not self._confirmar_incidencias(queue_records):
             return
 
         if getattr(self, "_render_worker", None) is not None:
@@ -1183,6 +1311,28 @@ class ControlPanel(QWidget):
 
         return has_siblings(reg, self._sibling_groups())
 
+    @staticmethod
+    def _analizar_incidencias(records: list) -> dict:
+        """Incidencias de integridad del padrón, por ``registro.id``.
+
+        Un fallo del detector no debe dejar al operador sin ver su padrón: se
+        devuelve vacío y la tabla se comporta como antes.
+        """
+        try:
+            from credencializacion.services.incidencias import analizar_lote
+
+            return analizar_lote(records)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("No se pudieron analizar las incidencias: %s", exc)
+            return {}
+
+    def _incidencias(self) -> dict:
+        """Mapa ``{registro_id: [Incidencia…]}`` del padrón cargado."""
+        return getattr(self, "_incidencias_lote", {}) or {}
+
+    def _tiene_incidencias(self, reg: "Registro") -> bool:
+        return reg.id in self._incidencias()
+
     def _status_filter_predicate(self, status: str):
         """Devuelve el predicado de filtrado para una pill de estado."""
         if status == "hermanos":
@@ -1198,6 +1348,7 @@ class ControlPanel(QWidget):
             "sin_foto": lambda r: not self._has_photo(r),
             "con_formulario": self._has_form,
             "sin_formulario": lambda r: not self._has_form(r),
+            "incidencias": self._tiene_incidencias,
         }.get(status)
 
     def _apply_status_filter(self, status: str | None) -> None:
@@ -1210,6 +1361,7 @@ class ControlPanel(QWidget):
         self._pill_with_form.setChecked(status == "con_formulario")
         self._pill_no_form.setChecked(status == "sin_formulario")
         self._pill_siblings.setChecked(status == "hermanos")
+        self._pill_incidencias.setChecked(status == "incidencias")
         self._apply_filters()
 
     def _apply_filters(self) -> None:
@@ -1288,6 +1440,8 @@ class ControlPanel(QWidget):
             self._pill_with_form.setText("📝 Con formulario: 0")
             self._pill_no_form.setText("📋 Sin formulario: 0")
             self._pill_siblings.setText("👨‍👩‍👦 Hermanos: 0")
+            self._pill_incidencias.setText("⚠ Incidencias: 0")
+            self._pill_incidencias.setVisible(False)
             return
 
         from credencializacion.services.print_rules import has_siblings
@@ -1306,6 +1460,14 @@ class ControlPanel(QWidget):
         self._pill_with_form.setText(f"📝 Con formulario: {with_form}")
         self._pill_no_form.setText(f"📋 Sin formulario: {total - with_form}")
         self._pill_siblings.setText(f"👨‍👩‍👦 Hermanos: {with_siblings}")
+
+        # La pill de incidencias solo aparece cuando hay algo que revisar: un
+        # "⚠ Incidencias: 0" permanente entrena a ignorar el aviso.
+        con_incidencias = len(self._incidencias())
+        self._pill_incidencias.setText(f"⚠ Incidencias: {con_incidencias}")
+        self._pill_incidencias.setVisible(con_incidencias > 0)
+        if not con_incidencias and self._active_status_filter == "incidencias":
+            self._apply_status_filter(None)
 
     def _load_client_templates(self, cliente_id: int) -> None:
         """Carga las plantillas del cliente seleccionado en el combo de plantillas.
@@ -1789,7 +1951,7 @@ class ControlPanel(QWidget):
         end = min(start + self.PAGE_SIZE, self._total_records)
         page_records = source[start:end]
 
-        self._table.set_records(page_records)
+        self._table.set_records(page_records, self._incidencias())
 
         # Actualizar label de conteo
         if self._total_records > 0:

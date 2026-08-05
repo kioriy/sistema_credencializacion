@@ -3,6 +3,7 @@ Utilidades del sistema de credencialización.
 """
 from credencializacion.utils.paths import (
     get_app_root,
+    get_credentials_dir,
     get_data_dir,
     get_db_path,
     get_image_cache_dir,
@@ -16,6 +17,7 @@ from credencializacion.utils.qr import (
 
 __all__ = [
     "get_app_root",
+    "get_credentials_dir",
     "get_data_dir",
     "get_db_path",
     "get_image_cache_dir",

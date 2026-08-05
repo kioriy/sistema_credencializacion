@@ -7,6 +7,9 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QFontMetrics
 from credencializacion.core.settings import AppSettings
 from credencializacion.ui.styles import COLORS
+from credencializacion.ui.widgets.attribute_dictionary import (
+    AttributeDictionaryGroup,
+)
 
 class ConfigPanel(QWidget):
     """Panel de Configuración Global de la Aplicación."""
@@ -233,6 +236,11 @@ class ConfigPanel(QWidget):
         sheets_layout.addLayout(sheets_form)
         layout.addWidget(sheets_group)
 
+        # Grupo: Diccionario de atributos (canónicos, definiciones y
+        # reconciliación de plantillas).
+        self.dictionary_group = AttributeDictionaryGroup()
+        layout.addWidget(self.dictionary_group)
+
         # Acciones
         actions_layout = QHBoxLayout()
         actions_layout.addStretch()
@@ -409,13 +417,54 @@ class ConfigPanel(QWidget):
         self._populate_profiles()
 
     def _browse_sheets_credentials(self) -> None:
+        """Elige el JSON del service account y lo resguarda en la app.
+
+        El archivo no se deja donde el usuario lo descargó: se valida y se
+        copia a la carpeta estable del sistema operativo. En los ajustes queda
+        esa ruta, no la de Descargas, que el sistema puede limpiar.
+        """
+        from pathlib import Path
+
+        from credencializacion.adapters.sheets import instalar_credencial_sheets
+
         path, _ = QFileDialog.getOpenFileName(
             self, "Seleccionar credenciales de Google (service account)",
             "", "JSON (*.json);;Todos los archivos (*)",
         )
-        if path:
-            self.sheets_cred_input.setText(path)
-            self._refresh_service_email(path)
+        if not path:
+            return
+
+        try:
+            destino = instalar_credencial_sheets(Path(path))
+        except (FileNotFoundError, ValueError) as exc:
+            # Archivo inválido: no se movió nada, el original sigue donde estaba.
+            QMessageBox.warning(
+                self, "Credenciales de Google",
+                f"El archivo seleccionado no se pudo usar:\n\n{exc}\n\n"
+                "Debe ser el JSON de una cuenta de servicio de Google Cloud "
+                "(el que se descarga en «Cuentas de servicio → Claves»).",
+            )
+            self._refresh_service_email("")
+            return
+        except OSError as exc:
+            QMessageBox.warning(
+                self, "Credenciales de Google",
+                f"No se pudo guardar la credencial en la carpeta de la "
+                f"aplicación:\n\n{exc}",
+            )
+            return
+
+        self.sheets_cred_input.setText(str(destino))
+        self._refresh_service_email(str(destino))
+        QMessageBox.information(
+            self, "Credenciales de Google",
+            "La credencial se guardó en la carpeta de la aplicación:\n\n"
+            f"{destino}\n\n"
+            "Se movió desde su ubicación original para que una limpieza de "
+            "Descargas o una sincronización en la nube no la borre.\n\n"
+            "Falta compartir el documento de Google Sheets con el correo de "
+            "la cuenta de servicio, con permiso de Lector.",
+        )
 
     def _refresh_service_email(self, cred_path: str) -> None:
         """Muestra el correo del service account leído del JSON, si es válido."""

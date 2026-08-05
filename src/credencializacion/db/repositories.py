@@ -183,4 +183,11 @@ class LadoConfigRepository:
             for clave in datos.keys():
                 _agregar(clave)
 
-        return atributos
+        # Vista canónica: las variantes de un mismo dato (`address`,
+        # `direccion`, `calle`…) colapsan en una sola entrada, para que el
+        # usuario no elija entre sinónimos al construir una condición. Las
+        # claves que el diccionario aún no conoce se conservan tal cual: nada
+        # desaparece del selector por no estar clasificado todavía.
+        from credencializacion.services.diccionario import vista_canonica
+
+        return vista_canonica(atributos)

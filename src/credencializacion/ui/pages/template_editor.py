@@ -8,6 +8,7 @@ de la plantilla con vista previa en tiempo real.
 from __future__ import annotations
 
 import copy
+import logging
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt, Signal, QSize, QMimeData, QPoint
@@ -41,6 +42,8 @@ from credencializacion.ui.widgets.layers_panel import LayersPanel
 from credencializacion.ui.widgets.canvas import CredentialView, CredentialScene, MM_TO_PX
 if TYPE_CHECKING:
     from credencializacion.db.models import Plantilla, Registro
+
+logger = logging.getLogger(__name__)
 
 # ── Paleta de colores ──────────────────────────────────────────────────
 PRIMARY = "#FB5252"
@@ -89,33 +92,49 @@ class CanvasToolbar(QWidget):
 
     item_dragged = Signal(str)  # Tipo de elemento arrastrado
 
-    # Atributos estandarizados del sistema
-    # Los campos (4ta columna) coinciden exactamente con los keys del registro
-    DEFAULT_ATTRIBUTES = [
+    # Elementos que no son atributos del diccionario sino piezas del propio
+    # editor: el texto compuesto, la imagen genérica y los slots de hermano.
+    # El número de hermano (2/3/4) se elige en las propiedades; se resuelven al
+    # imprimir por `tutor_email`. La FOTO del hermano se asigna reutilizando el
+    # atributo de imagen: se arrastra "Imagen", origen "Atributo", y se elige
+    # "Hermano 2/3/4" en el combo de imagen.
+    ATRIBUTOS_FIJOS = [
         ("composite",  "📝",  "Texto Compuesto",    "composite"),
         ("photo_path", "🖼",  "Imagen",              "photo_url"),
-        # Slots de hermano de TEXTO: un solo arrastrable por dato; el número de
-        # hermano (2/3/4) se elige en las propiedades. Se resuelven al imprimir
-        # por `tutor_email` (credenciales de autorizados). La FOTO del hermano
-        # se asigna reutilizando el atributo de imagen: se arrastra "Imagen",
-        # origen "Atributo", y se elige "Hermano 2/3/4" en el combo de imagen.
         ("text",       "👨‍👩‍👦", "Nombre Hermano",     "nombre_hermano_2"),
         ("text",       "👨‍👩‍👦", "Grado Hermano",      "grado_hermano_2"),
         ("text",       "👨‍👩‍👦", "Grupo Hermano",      "grupo_hermano_2"),
-        ("text",       "👤",  "Nombre",              "nombre"),
-        ("text",       "👤",  "Apellidos",           "apellido"),
-        ("text",       "🏢",  "Escuela",             "escuela"),
-        ("text",       "🏫",  "Nivel Escolar",       "nivel_escolar"),
-        ("text",       "🔢",  "Matrícula",           "matricula"),
-        ("text",       "🔢",  "CURP",                "curp"),
-        ("text",       "📚",  "Grado",               "grado"),
-        ("text",       "📚",  "Grupo",               "grupo"),
-        ("text",       "⏰",  "Turno",               "turno"),
-        ("text",       "📅",  "Fecha Nacimiento",    "fecha_nacimiento"),
-        ("text",       "🩸",  "Tipo de Sangre",      "tipo_sangre"),
-        ("text",       "📍",  "Domicilio",           "domicilio"),
-        ("text",       "📞",  "Teléfono",            "telefono"),
     ]
+
+    @classmethod
+    def atributos_base(cls) -> list[tuple[str, str, str, str]]:
+        """Arrastrables fijos más los atributos canónicos del diccionario.
+
+        La lista ya no está escrita a mano: sale del diccionario que se
+        administra en Configuración, de modo que un atributo nuevo —o uno
+        renombrado— aparezca aquí sin tocar el editor. Si el diccionario no
+        puede leerse, quedan al menos las piezas fijas y los atributos
+        dinámicos del cliente, que se agregan aparte.
+        """
+        entradas = list(cls.ATRIBUTOS_FIJOS)
+        ya = {campo for _, _, _, campo in entradas}
+        try:
+            from credencializacion.services.diccionario import obtener_indice
+
+            for attr in obtener_indice().atributos:
+                if not attr.visible or attr.nombre in ya:
+                    continue
+                tipo = "photo_path" if attr.tipo == "image" else "text"
+                entradas.append(
+                    (tipo, attr.icono or "📌", attr.etiqueta or attr.nombre,
+                     attr.nombre)
+                )
+                ya.add(attr.nombre)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "No se pudo leer el diccionario de atributos: %s", exc,
+            )
+        return entradas
 
     item_dragged = Signal(str)
     template_name_changed = Signal(str)
@@ -123,6 +142,9 @@ class CanvasToolbar(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setFixedWidth(210)
+        # Catálogo con el que se pintó el panel; se recalcula en cada carga
+        # porque el diccionario puede haber cambiado en Configuración.
+        self._atributos_vigentes: list[tuple[str, str, str, str]] = []
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -244,7 +266,8 @@ class CanvasToolbar(QWidget):
 
     def _load_default_attributes(self) -> None:
         """Carga los atributos por defecto en el panel."""
-        for elem_type, icon, label, campo in self.DEFAULT_ATTRIBUTES:
+        self._atributos_vigentes = self.atributos_base()
+        for elem_type, icon, label, campo in self._atributos_vigentes:
             drag_data = f"{elem_type}:{campo}"
             btn = DraggableButton(f"{icon}  {label}", drag_data)
             btn.setCursor(QCursor(Qt.CursorShape.OpenHandCursor))
@@ -370,9 +393,32 @@ class CanvasToolbar(QWidget):
 
         self._load_default_attributes()
 
-        # Agregar atributos extra si los hay
+        # Atributos extra del cliente: se canonizan primero, de modo que las
+        # variantes de un mismo dato (`address`, `direccion`…) no aparezcan
+        # como arrastrables aparte del atributo al que pertenecen. Lo que el
+        # diccionario todavía no reconoce se sigue mostrando tal cual, para
+        # que ningún dato desaparezca del panel por no estar clasificado.
+        try:
+            from credencializacion.services.diccionario import (
+                obtener_indice, vista_canonica,
+            )
+
+            indice = obtener_indice()
+            ocultos = {
+                a.nombre for a in indice.atributos if not a.visible
+            }
+            # Los ocultos se descartan aquí también: si solo se excluyeran del
+            # catálogo base, volverían a colarse por esta lista como atributos
+            # dinámicos y la opción de ocultarlos no serviría de nada.
+            attributes = [
+                a for a in vista_canonica(attributes, indice)
+                if a not in ocultos
+            ]
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("No se pudo canonizar el catálogo del cliente: %s", exc)
+
         for attr in attributes:
-            if not any(attr == campo for _, _, _, campo in self.DEFAULT_ATTRIBUTES):
+            if not any(attr == campo for _, _, _, campo in self._atributos_vigentes):
                 btn = DraggableButton(f"📌  {attr}", f"text:{attr}")
                 btn.setCursor(QCursor(Qt.CursorShape.OpenHandCursor))
                 btn.setStyleSheet(f"""

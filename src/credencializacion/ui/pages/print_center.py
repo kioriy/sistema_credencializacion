@@ -1345,6 +1345,7 @@ class PrintCenter(QWidget):
         imagen base del diseño). La config de cada diseño se cachea por id.
         """
         from credencializacion.db.repositories import LadoConfigRepository
+        from credencializacion.services.diccionario import clave_real
         from credencializacion.services.image_selection import select_imagen
 
         cache: dict[int, object] = {}
@@ -1357,7 +1358,9 @@ class PrintCenter(QWidget):
             if config is None:
                 overrides.append(None)
             else:
-                overrides.append(select_imagen(item.registro.datos or {}, config))
+                overrides.append(
+                    select_imagen(item.registro.datos or {}, config, clave_real)
+                )
         return overrides
 
     # ── Métodos públicos ───────────────────────────────────────────

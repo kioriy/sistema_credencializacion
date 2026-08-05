@@ -2,6 +2,8 @@
 Creación inicial de tablas y datos semilla.
 Ejecuta create_all para generar el esquema SQLite.
 """
+import logging
+
 from sqlalchemy import inspect, text
 
 from credencializacion.db.engine import get_engine
@@ -17,6 +19,8 @@ from credencializacion.db.models import (
 )
 from credencializacion.db.engine import DatabaseSession
 
+logger = logging.getLogger(__name__)
+
 
 def init_database() -> None:
     """Crea las tablas si no existen y migra el esquema/datos si hace falta."""
@@ -26,6 +30,106 @@ def init_database() -> None:
     _add_cola_pdf_columns(engine)
     _migrate_plantilla_base()
     _migrate_plantilla_base_por_cliente()
+    _sembrar_diccionario()
+    _revertir_ocultos_por_defecto()
+
+
+def migracion_aplicada(session, clave: str) -> bool:
+    """Indica si una corrección de datos puntual ya se ejecutó."""
+    from credencializacion.db.models import MarcaMigracion
+
+    return session.get(MarcaMigracion, clave) is not None
+
+
+def marcar_migracion(session, clave: str) -> None:
+    """Deja constancia de que una corrección puntual ya se ejecutó."""
+    from credencializacion.db.models import MarcaMigracion
+
+    if session.get(MarcaMigracion, clave) is None:
+        session.add(MarcaMigracion(clave=clave))
+
+
+# Marcas que dejó la política fija de "atributos ocultos por defecto", retirada
+# en favor de que la visibilidad la decida el usuario desde Configuración.
+_CLAVE_OCULTOS_LEGADA = "ocultos_por_defecto_v1"
+_PREFIJO_OCULTO = "oculto_por_defecto:"
+_CLAVE_REVERSION = "revertir_ocultos_por_defecto_v1"
+
+
+def _revertir_ocultos_por_defecto() -> None:
+    """Devuelve la visibilidad que ocultó automáticamente la política retirada.
+
+    Se ejecuta una sola vez y solo alcanza a los atributos que el propio
+    sistema ocultó —los que dejaron su marca ``oculto_por_defecto:<nombre>``—,
+    así que no toca lo que el usuario haya ocultado a mano desde Configuración.
+    Las marcas se retiran para no dejar rastro de una política que ya no
+    existe.
+    """
+    from credencializacion.db.models import AtributoCanonico, MarcaMigracion
+    from credencializacion.services.diccionario import invalidar_indice
+
+    cambiados = 0
+    try:
+        with DatabaseSession() as session:
+            if migracion_aplicada(session, _CLAVE_REVERSION):
+                return
+
+            marcas = (
+                session.query(MarcaMigracion)
+                .filter(MarcaMigracion.clave.like(f"{_PREFIJO_OCULTO}%"))
+                .all()
+            )
+            nombres = [m.clave[len(_PREFIJO_OCULTO):] for m in marcas]
+
+            if nombres:
+                afectados = (
+                    session.query(AtributoCanonico)
+                    .filter(AtributoCanonico.nombre.in_(nombres))
+                    .filter(AtributoCanonico.visible.is_(False))
+                    .all()
+                )
+                for attr in afectados:
+                    attr.visible = True
+                cambiados = len(afectados)
+
+            for marca in marcas:
+                session.delete(marca)
+            legada = session.get(MarcaMigracion, _CLAVE_OCULTOS_LEGADA)
+            if legada is not None:
+                session.delete(legada)
+
+            marcar_migracion(session, _CLAVE_REVERSION)
+            if cambiados:
+                logger.info(
+                    "Se restauró la visibilidad de %d atributo(s).", cambiados,
+                )
+        if cambiados:
+            invalidar_indice()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("No se pudo restaurar la visibilidad: %s", exc)
+
+
+def _sembrar_diccionario() -> None:
+    """Siembra los atributos canónicos y sus definiciones que falten.
+
+    Idempotente y respetuosa de lo configurado: en una instalación que ya venía
+    en producción solo agrega lo que no exista, sin tocar las definiciones que
+    el usuario haya añadido ni reponer las que haya quitado a propósito.
+
+    Deliberadamente NO reconcilia las plantillas: reescribir configuraciones del
+    usuario en un arranque, sin que él lo pida ni lo vea, es justo lo que no
+    queremos. Esa operación vive en Configuración, con vista previa y deshacer.
+    """
+    from credencializacion.services.diccionario import sembrar
+
+    try:
+        with DatabaseSession() as session:
+            sembrar(session)
+    except Exception as exc:  # noqa: BLE001
+        # Un fallo aquí no debe impedir que la app abra: sin diccionario, la
+        # resolución cae a coincidencia directa, que es el comportamiento
+        # previo a esta funcionalidad.
+        logger.warning("No se pudo sembrar el diccionario de atributos: %s", exc)
 
 
 def _add_cola_pdf_columns(engine) -> None:

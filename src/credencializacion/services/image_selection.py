@@ -16,6 +16,11 @@ Modelo:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable, Optional
+
+# Traduce (datos, atributo) → clave realmente presente en los datos, o None.
+# Se inyecta desde fuera para no acoplar este módulo a la base de datos.
+ResolverClave = Callable[[dict, str], Optional[str]]
 
 
 @dataclass(frozen=True)
@@ -61,13 +66,21 @@ def _condicion_se_cumple(
     condicion: CondicionDTO,
     datos: dict[str, object],
     normalized_keys: dict[str, str],
+    resolver_clave: ResolverClave | None = None,
 ) -> bool:
     """Indica si una condición se cumple para un registro.
 
     Si el registro no contiene el atributo, la condición no se cumple. En otro
     caso compara ``normalize(datos[atributo]) == normalize(valor)``.
+
+    Con ``resolver_clave``, una condición sobre ``domicilio`` también encuentra
+    el ``address`` del registro. Sin él (comportamiento por defecto) la
+    comparación es solo por coincidencia directa, que es lo que mantiene a este
+    módulo puro y testeable de forma aislada.
     """
     original_key = normalized_keys.get(normalize(condicion.atributo))
+    if original_key is None and resolver_clave is not None:
+        original_key = resolver_clave(datos, condicion.atributo)
     if original_key is None:
         return False
     return normalize(datos.get(original_key)) == normalize(condicion.valor)
@@ -77,6 +90,7 @@ def _variante_coincide(
     variante: VarianteDTO,
     datos: dict[str, object],
     normalized_keys: dict[str, str],
+    resolver_clave: ResolverClave | None = None,
 ) -> bool:
     """Indica si TODAS las condiciones de la variante se cumplen (AND).
 
@@ -85,22 +99,32 @@ def _variante_coincide(
     if not variante.condiciones:
         return False
     return all(
-        _condicion_se_cumple(c, datos, normalized_keys) for c in variante.condiciones
+        _condicion_se_cumple(c, datos, normalized_keys, resolver_clave)
+        for c in variante.condiciones
     )
 
 
-def select_imagen(datos: dict[str, object], config: ConfigLadoDTO) -> str | None:
+def select_imagen(
+    datos: dict[str, object],
+    config: ConfigLadoDTO,
+    resolver_clave: ResolverClave | None = None,
+) -> str | None:
     """Elige la ruta de imagen de fondo para un registro y lado.
 
     Evalúa ``config.variantes`` en orden ascendente de ``orden``; gana la primera
     variante cuyas condiciones se cumplen todas (AND). Si ninguna coincide,
     devuelve ``config.imagen_default_path`` (que puede ser ``None``). Determinista.
+
+    Args:
+        resolver_clave: Opcional. Traductor de atributo → clave presente en los
+            datos, para que las condiciones puedan expresarse con el nombre
+            canónico aunque el origen use otra palabra.
     """
     datos = datos or {}
     normalized_keys = {normalize(k): k for k in datos.keys()}
 
     for variante in sorted(config.variantes, key=lambda v: v.orden):
-        if _variante_coincide(variante, datos, normalized_keys):
+        if _variante_coincide(variante, datos, normalized_keys, resolver_clave):
             return variante.imagen_path
 
     return config.imagen_default_path

@@ -9,7 +9,7 @@ Arquitectura multi-tenant con columnas JSON dinámicas:
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import Boolean, JSON, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -170,8 +170,23 @@ class Registro(Base):
         return self.cliente.nombre if self.cliente else ""
 
     def get_dato(self, key: str, default: Any = "") -> Any:
-        """Acceso seguro a un atributo dinámico."""
-        return (self.datos or {}).get(key, default)
+        """Acceso seguro a un atributo dinámico, aplicando el diccionario.
+
+        Si la clave está tal cual en los datos, se devuelve directo. Si no, se
+        consulta el diccionario de atributos: pedir ``domicilio`` encuentra el
+        ``address`` que mandó el origen, sin haber tenido que reescribir nada
+        al sincronizar.
+        """
+        datos = self.datos or {}
+        if key in datos:
+            return datos[key]
+
+        from credencializacion.services.diccionario import clave_real
+
+        real = clave_real(datos, key)
+        if real is None:
+            return default
+        return datos.get(real, default)
 
     def __repr__(self) -> str:
         return (
@@ -477,4 +492,123 @@ class CondicionVariante(Base):
             f"<CondicionVariante(id={self.id}, variante_id={self.variante_id}, "
             f"atributo='{self.atributo}', valor='{self.valor}', "
             f"orden={self.orden})>"
+        )
+
+
+class AtributoCanonico(Base):
+    """Atributo estándar del sistema, con su diccionario de definiciones.
+
+    Un atributo canónico es el nombre ÚNICO con el que las plantillas y las
+    condiciones de multiplantillaje se refieren a un dato, sin importar cómo lo
+    llame cada origen. Las variantes reales (``address``, ``direccion``,
+    ``calle``…) viven en `AliasAtributo` y se administran desde Configuración.
+
+    ``es_sistema`` marca los atributos que el código referencia por nombre
+    literal (``enrollment_code`` identifica al registro en el upsert del sync,
+    ``student_id`` se envía a la API para marcar impresión, ``tutor_email``
+    agrupa hermanos…). Su ``nombre`` NO puede cambiarse ni eliminarse — pero su
+    diccionario sí es editable, que es lo que permite adaptarlo a cada país.
+    """
+    __tablename__ = "atributos_canonicos"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    nombre: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
+    etiqueta: Mapped[str] = mapped_column(String(120), nullable=False, default="")
+    tipo: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="text"
+    )  # "text" | "image"
+    icono: Mapped[str] = mapped_column(String(16), nullable=False, default="")
+    orden: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    es_sistema: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+    # Los de sistema que además son ancla del propio motor (no arrastrables ni
+    # ofrecidos como destino en la bandeja de sin clasificar).
+    visible: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+
+    alias: Mapped[list["AliasAtributo"]] = relationship(
+        back_populates="atributo",
+        cascade="all, delete-orphan",
+        order_by="AliasAtributo.id",
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<AtributoCanonico(id={self.id}, nombre='{self.nombre}', "
+            f"sistema={self.es_sistema})>"
+        )
+
+
+class AliasAtributo(Base):
+    """Una definición (clave de origen) que apunta a un atributo canónico.
+
+    El ``alias`` se guarda ya normalizado (recortado y en minúsculas) y es
+    ÚNICO en toda la instalación: esa restricción, a nivel de base de datos,
+    es lo que impide que una misma clave quede asociada a dos atributos y la
+    resolución dependa del orden — la causa de que un dato se pierda en
+    silencio.
+    """
+    __tablename__ = "alias_atributo"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    atributo_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("atributos_canonicos.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    alias: Mapped[str] = mapped_column(String(120), nullable=False, unique=True)
+    origen: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="usuario"
+    )  # "semilla" | "usuario"
+
+    atributo: Mapped["AtributoCanonico"] = relationship(back_populates="alias")
+
+    def __repr__(self) -> str:
+        return f"<AliasAtributo(alias='{self.alias}' → {self.atributo_id})>"
+
+
+class MarcaMigracion(Base):
+    """Registro de las correcciones de datos que ya se aplicaron una vez.
+
+    Las migraciones del proyecto son idempotentes por inspección ("si falta la
+    columna, agrégala"), lo cual no sirve para un cambio de VALOR por defecto:
+    no hay forma de distinguir "todavía no se aplicó" de "el usuario lo cambió
+    a propósito". Esta marca resuelve esa diferencia — la corrección corre una
+    sola vez y después la preferencia del usuario manda.
+    """
+    __tablename__ = "marcas_migracion"
+
+    clave: Mapped[str] = mapped_column(String(100), primary_key=True)
+    aplicada_en: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+
+    def __repr__(self) -> str:
+        return f"<MarcaMigracion(clave='{self.clave}')>"
+
+
+class RespaldoReconciliacion(Base):
+    """Instantánea previa a una reconciliación, para poder deshacerla.
+
+    Guarda el estado anterior de las plantillas y condiciones que la operación
+    modificó. Permite revertir una reconciliación mal aplicada sin restaurar la
+    base completa.
+    """
+    __tablename__ = "respaldos_reconciliacion"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    descripcion: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    aplicado_en: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    revertido: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    def __repr__(self) -> str:
+        return (
+            f"<RespaldoReconciliacion(id={self.id}, "
+            f"revertido={self.revertido})>"
         )

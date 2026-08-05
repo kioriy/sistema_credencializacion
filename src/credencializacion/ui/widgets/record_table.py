@@ -32,6 +32,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QMenu,
     QAbstractItemView,
+    QStyle,
+    QStyleOptionViewItem,
     QStyledItemDelegate,
 )
 
@@ -50,6 +52,14 @@ WARNING = "#F59E0B"
 ERROR = "#EF4444"
 INFO_BLUE = "#3B82F6"
 MAIN_BG = "#F5F7FA"
+
+# ── Incidencias de integridad ──────────────────────────────────────────
+# Naranja de fondo para la fila con incidencia, y un tono más saturado para
+# cuando además está seleccionada: el color de selección normal (#FECACA)
+# taparía la marca justo al seleccionarla para leer el resumen.
+INCIDENCIA_BG = "#FFEDD5"
+INCIDENCIA_BG_SEL = "#FDBA74"
+INCIDENCIA_FG = "#7C2D12"
 
 # Mapeo de estados a colores de badge
 STATUS_COLORS: dict[str, tuple[str, str]] = {
@@ -214,12 +224,46 @@ def _create_circular_pixmap(path: str, size: int = PHOTO_SIZE) -> QPixmap:
     return make_circular_pixmap(source, size)
 
 
+class IncidenciaDelegate(QStyledItemDelegate):
+    """Pinta en naranja las filas con incidencias de integridad.
+
+    Se hace con un delegate y no con ``QTableWidgetItem.setBackground`` porque
+    la regla ``QTableWidget::item:selected`` del stylesheet gana sobre el fondo
+    del item: la marca desaparecería justo al seleccionar la fila para leer su
+    resumen. Aquí el fondo se pinta antes que el resto y la selección se
+    representa con un naranja más saturado.
+    """
+
+    def __init__(self, tabla: "RecordTable") -> None:
+        super().__init__(tabla)
+        self._tabla = tabla
+
+    def paint(self, painter, option, index) -> None:
+        if self._tabla.fila_con_incidencia(index.row()):
+            seleccionada = bool(option.state & QStyle.StateFlag.State_Selected)
+            painter.fillRect(
+                option.rect,
+                QColor(INCIDENCIA_BG_SEL if seleccionada else INCIDENCIA_BG),
+            )
+            # Hay que desactivar las dos marcas que harían al estilo repintar
+            # el fondo encima del naranja: la de selección (`::item:selected`)
+            # y la de fila alterna (`::item:alternate`). Sin la segunda, la
+            # marca solo se veía en las filas pares.
+            option.state &= ~QStyle.StateFlag.State_Selected
+            option.features &= ~QStyleOptionViewItem.ViewItemFeature.Alternate
+        super().paint(painter, option, index)
+
+
 class RecordTable(QTableWidget):
     """Tabla de registros con estilo premium para el panel de control.
 
     Muestra registros con foto circular, nombre, institución, estado
     como badge pill, y botones de acción. Soporta selección múltiple
     con checkboxes, sorting, y menú contextual.
+
+    Las filas cuyo registro tiene incidencias de integridad (CURP que no
+    concuerda, exceso de personas autorizadas…) se pintan en naranja y llevan
+    un ⚠ junto a la matrícula.
 
     Signals:
         record_double_clicked(int): ID del registro al hacer doble clic.
@@ -233,8 +277,33 @@ class RecordTable(QTableWidget):
         super().__init__(parent)
         self._records: list["Registro"] = []
         self._registro_ids: list[int] = []  # IDs en orden de filas
+        # {registro_id: [Incidencia, …]} — solo los que tienen alguna.
+        self._incidencias: dict[int, list] = {}
         self._setup_table()
         self._setup_style()
+        self.setItemDelegate(IncidenciaDelegate(self))
+
+    # ── Incidencias ──────────────────────────────────────────────────
+
+    def id_de_fila(self, row: int) -> int | None:
+        """ID del registro de una fila (sobrevive al ordenamiento)."""
+        item = self.item(row, COL_CHECK)
+        return item.data(Qt.ItemDataRole.UserRole) if item else None
+
+    def fila_con_incidencia(self, row: int) -> bool:
+        """Indica si la fila corresponde a un registro con incidencias."""
+        if not self._incidencias:
+            return False
+        return self.id_de_fila(row) in self._incidencias
+
+    def incidencias_de(self, reg_id: int) -> list:
+        """Incidencias detectadas para un registro."""
+        return self._incidencias.get(reg_id, [])
+
+    @property
+    def total_con_incidencias(self) -> int:
+        """Cuántos registros del padrón cargado tienen alguna incidencia."""
+        return len(self._incidencias)
 
     def _setup_table(self) -> None:
         """Configura columnas, headers y comportamiento de la tabla."""
@@ -324,14 +393,37 @@ class RecordTable(QTableWidget):
             }}
         """)
 
-    def set_records(self, records: list["Registro"]) -> None:
+    def set_records(
+        self,
+        records: list["Registro"],
+        incidencias: dict[int, list] | None = None,
+    ) -> None:
         """Carga registros en la tabla.
 
         Args:
             records: Lista de modelos Registro a mostrar.
+            incidencias: Incidencias ya calculadas sobre el padrón COMPLETO,
+                ``{registro_id: [Incidencia…]}``. Conviene pasarlas: calcularlas
+                aquí solo vería la página actual, y hay reglas —«CURP
+                repetida»— que necesitan comparar todos los registros entre sí.
+                Si se omite, se calculan sobre lo que se está mostrando.
         """
         self._records = records
         self._registro_ids.clear()
+
+        # Las incidencias se resuelven antes de pintar: el marcado de la fila y
+        # el ⚠ de la matrícula dependen del resultado.
+        if incidencias is not None:
+            self._incidencias = incidencias
+        else:
+            try:
+                from credencializacion.services.incidencias import analizar_lote
+
+                self._incidencias = analizar_lote(records)
+            except Exception:  # noqa: BLE001
+                # Un fallo del detector no debe impedir ver el padrón.
+                self._incidencias = {}
+
         self.setSortingEnabled(False)  # Desactivar durante carga
         self.setRowCount(len(records))
 
@@ -375,11 +467,12 @@ class RecordTable(QTableWidget):
         photo_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
         self.setItem(row, COL_PHOTO, photo_item)
 
-        # Col 2: ID
+        # Col 2: ID (con ⚠ si el registro tiene incidencias de integridad)
+        hallazgos = self._incidencias.get(reg.id, [])
         enrollment = reg.enrollment_code or "—"
-        id_item = QTableWidgetItem(enrollment)
+        id_item = QTableWidgetItem(f"⚠ {enrollment}" if hallazgos else enrollment)
         id_item.setFont(QFont("Inter", 11))
-        id_item.setForeground(QColor(TEXT_LIGHT))
+        id_item.setForeground(QColor(INCIDENCIA_FG if hallazgos else TEXT_LIGHT))
         self.setItem(row, COL_ID, id_item)
 
         # Col 3: NOMBRE(S)
@@ -418,6 +511,16 @@ class RecordTable(QTableWidget):
         actions = AddToQueueButton(reg.id)
         actions.add_clicked.connect(lambda rid: self.add_to_queue_clicked.emit(rid)) 
         self.setCellWidget(row, COL_ACCION, actions)
+
+        # Tooltip con el detalle de las incidencias en toda la fila: se lee al
+        # pasar el cursor, sin tener que seleccionar ni abrir nada.
+        if hallazgos:
+            detalle = "\n".join(f"• {h.detalle}" for h in hallazgos)
+            texto = f"Revisar antes de imprimir:\n{detalle}"
+            for col in range(self.columnCount()):
+                celda = self.item(row, col)
+                if celda is not None:
+                    celda.setToolTip(texto)
 
         # Altura de fila
         self.setRowHeight(row, 56)

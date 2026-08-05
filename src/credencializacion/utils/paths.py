@@ -140,6 +140,31 @@ def get_db_path() -> Path:
     return get_data_dir() / "credencializacion.db"
 
 
+def get_credentials_dir() -> Path:
+    """Carpeta donde la app resguarda las credenciales que se le cargan.
+
+    - Windows: ``%APPDATA%/Credencializacion/credenciales``
+    - macOS:   ``~/Library/Application Support/Credencializacion/credenciales``
+    - Linux:   ``$XDG_DATA_HOME/Credencializacion/credenciales``
+
+    A diferencia de ``get_data_dir()``, esta ubicación es la misma en desarrollo
+    y empaquetada: una credencial no debe quedar dentro del directorio del
+    proyecto, donde un cliente de sincronización en la nube puede versionarla,
+    restaurarla o subirla a un tercero.
+
+    Se crea con permisos de solo-el-dueño (0700) donde el sistema lo soporta.
+    """
+    carpeta = _user_data_base() / "credenciales"
+    carpeta.mkdir(parents=True, exist_ok=True)
+    try:
+        carpeta.chmod(0o700)
+    except OSError:
+        # Windows y algunos sistemas de archivos de red no soportan chmod:
+        # no es motivo para impedir guardar la credencial.
+        pass
+    return carpeta
+
+
 def get_image_cache_dir(cliente_id: int | None = None) -> Path:
     """Directorio de caché de imágenes descargadas."""
     cache = get_data_dir() / "image_cache"

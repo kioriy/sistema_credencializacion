@@ -26,6 +26,11 @@ _BACKOFF_FACTOR = 0.5
 _RETRY_STATUS_CODES = (429, 500, 502, 503, 504)
 _REQUEST_TIMEOUT = 30  # segundos
 
+# Prefijo con el que se conserva un campo de `student_record` cuya clave choca
+# con un atributo fijo del adaptador. Se eligió una palabra que no aparece en
+# ninguna cabecera de origen conocida, para no generar una segunda colisión.
+_PREFIJO_FICHA = "student_record_"
+
 
 def _build_session(retries: int = _DEFAULT_RETRIES) -> requests.Session:
     """Crea una sesión HTTP con política de reintentos exponenciales."""
@@ -288,7 +293,10 @@ class MiEscuelaAdapter(DataAdapter):
           ``_principal/_foto`` (la foto es un atributo de imagen).
         - ``student_record`` (campos configurables por escuela) → cada clave
           escalar se expone como atributo dinámico, sin sobrescribir las
-          estándar.
+          estándar. Si una escuela usa para su ficha una palabra que ya ocupa
+          un atributo fijo (p. ej. define su propia ``matricula`` cuando el
+          adaptador ya escribió la de la plataforma), su valor NO se descarta:
+          se conserva bajo ``student_record_<clave>``. Ver ``_PREFIJO_FICHA``.
         El nombre completo se precalcula para mostrarlo en el diseñador.
         """
         classroom = raw.get("classroom") or {}
@@ -386,10 +394,40 @@ class MiEscuelaAdapter(DataAdapter):
         # aplanan las claves escalares sin sobrescribir atributos ya presentes.
         student_record = raw.get("student_record")
         if isinstance(student_record, dict):
-            for key, value in student_record.items():
-                if not isinstance(key, str) or key in record:
+            fijas = set(record)
+            escalares = {
+                clave: ("" if valor is None else valor)
+                for clave, valor in student_record.items()
+                if isinstance(clave, str)
+                and (isinstance(valor, (str, int, float, bool)) or valor is None)
+            }
+
+            # Primera pasada: las claves que no chocan. Van antes que las
+            # renombradas para que el resultado no dependa del orden en que la
+            # API haya serializado la ficha — si esta trae ya un
+            # `student_record_matricula` propio, ese conserva su lugar.
+            for clave, valor in escalares.items():
+                if clave not in fijas:
+                    record[clave] = valor
+
+            # Segunda pasada: las que chocan con un atributo fijo. Descartarlas
+            # era una pérdida silenciosa —el dato no llegaba a la base ni al
+            # catálogo del cliente, así que nada delataba que faltó—. Gana el
+            # valor del adaptador, que es lo que las plantillas ya imprimen, y
+            # el de la escuela se preserva con prefijo, donde el diccionario
+            # lo ve y lo ofrece en la bandeja de sin clasificar.
+            for clave, valor in escalares.items():
+                if clave not in fijas:
                     continue
-                if isinstance(value, (str, int, float, bool)) or value is None:
-                    record[key] = "" if value is None else value
+                if str(record[clave]).strip() == str(valor).strip():
+                    continue  # mismo dato: duplicarlo sería solo ruido
+                alterna = f"{_PREFIJO_FICHA}{clave}"
+                if alterna in record:
+                    continue
+                record[alterna] = valor
+                logger.debug(
+                    "student_record['%s'] choca con un atributo fijo; se "
+                    "conserva como '%s'.", clave, alterna,
+                )
 
         return record

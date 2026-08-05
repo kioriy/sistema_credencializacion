@@ -50,6 +50,7 @@ class QueueRenderWorker(QThread):
             from credencializacion.db.engine import DatabaseSession
             from credencializacion.db.models import Plantilla, Registro
             from credencializacion.db.repositories import LadoConfigRepository
+            from credencializacion.services.diccionario import clave_real
             from credencializacion.services.image_selection import select_imagen
             from credencializacion.renderer.pdf_engine import PDFEngine
 
@@ -100,7 +101,7 @@ class QueueRenderWorker(QThread):
                     if cfg is None:
                         return [None] * len(render_items)
                     return [
-                        select_imagen(reg.datos or {}, cfg)
+                        select_imagen(reg.datos or {}, cfg, clave_real)
                         for reg, _ in render_items
                     ]
 

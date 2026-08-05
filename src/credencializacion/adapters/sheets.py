@@ -203,6 +203,77 @@ def get_service_account_email(credentials_path: Path) -> str:
     return getattr(creds, "service_account_email", "") or ""
 
 
+# Nombre con el que se resguarda la credencial, para que la ruta guardada en
+# los ajustes no dependa del nombre aleatorio que Google le pone al descargarla.
+CREDENCIAL_SHEETS_NOMBRE = "google-sheets.json"
+
+
+def instalar_credencial_sheets(origen: Path) -> Path:
+    """Resguarda el JSON de service account en la carpeta de la app.
+
+    La app guarda en sus ajustes la RUTA del archivo, no una copia, así que
+    dejarlo en Descargas la rompe en cuanto el sistema limpia esa carpeta.
+    Esta función lo lleva a una ubicación estable propia del sistema operativo
+    (``get_credentials_dir()``), con permisos de solo-el-dueño.
+
+    El archivo se **valida antes de moverse**: si no es un JSON de service
+    account, no se toca nada. Si ya había una credencial instalada, se conserva
+    como ``google-sheets.json.anterior`` en vez de perderse.
+
+    Args:
+        origen: Archivo elegido por el usuario.
+
+    Returns:
+        Ruta definitiva del archivo resguardado.
+
+    Raises:
+        FileNotFoundError: Si el archivo de origen no existe.
+        ValueError: Si no es un JSON de service account válido.
+        OSError: Si no se pudo escribir en la carpeta de credenciales.
+    """
+    import shutil
+
+    from credencializacion.utils.paths import get_credentials_dir
+
+    origen = Path(origen).expanduser()
+    # Valida antes de mover: si el archivo no sirve, el usuario se queda con
+    # su descarga intacta y con un mensaje que dice por qué.
+    load_service_account_credentials(origen)
+
+    destino = get_credentials_dir() / CREDENCIAL_SHEETS_NOMBRE
+    if origen.resolve() == destino.resolve():
+        return destino  # ya está resguardado; nada que hacer
+
+    if destino.exists():
+        anterior = destino.with_suffix(destino.suffix + ".anterior")
+        try:
+            if anterior.exists():
+                anterior.unlink()
+            destino.replace(anterior)
+        except OSError as exc:  # noqa: BLE001
+            logger.warning("No se pudo conservar la credencial previa: %s", exc)
+
+    shutil.copy2(origen, destino)
+    try:
+        destino.chmod(0o600)
+    except OSError:
+        pass  # Windows y algunos sistemas de archivos no soportan chmod
+
+    # El original se retira solo después de que la copia quedó en su sitio.
+    # Si no se puede (permisos, archivo en uso), no es motivo de error: lo que
+    # importa es que la app ya tiene su copia estable.
+    try:
+        origen.unlink()
+    except OSError as exc:  # noqa: BLE001
+        logger.info(
+            "La credencial se resguardó en %s; el original en %s no se pudo "
+            "retirar: %s", destino, origen, exc,
+        )
+
+    logger.info("Credencial de Google Sheets resguardada en %s", destino)
+    return destino
+
+
 def authorize_gspread_client(credentials_path: Path):
     """Autoriza un cliente gspread con credenciales de service account."""
     try:
