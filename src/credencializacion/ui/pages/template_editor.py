@@ -644,7 +644,21 @@ class PropertiesPanel(QWidget):
         self._edit_test_text.textChanged.connect(
             lambda v: self.property_changed.emit("test_text", v)
         )
+        self._edit_test_text.textChanged.connect(
+            lambda _v: self._actualizar_aviso_regla()
+        )
         self._row_test = self._f_dyn.addRow("Dato prueba:", self._edit_test_text)
+
+        # Aviso cuando la regla no encuentra qué extraer del dato de muestra:
+        # sin esto, el elemento simplemente se veía vacío y no había forma de
+        # saber si fallaba la regla, el dato o la configuración.
+        self._lbl_regla_aviso = QLabel("")
+        self._lbl_regla_aviso.setWordWrap(True)
+        self._lbl_regla_aviso.setStyleSheet(
+            "color: #EA580C; font-size: 11px; background: transparent;"
+        )
+        self._lbl_regla_aviso.setVisible(False)
+        self._row_regla_aviso = self._f_dyn.addRow("", self._lbl_regla_aviso)
         
         self._edit_composite = QLineEdit()
         self._edit_composite.setPlaceholderText("Ej: {grado}º {grupo}")
@@ -665,6 +679,9 @@ class PropertiesPanel(QWidget):
             lambda _i: self.property_changed.emit(
                 "text_rule", self._combo_text_rule.currentData() or ""
             )
+        )
+        self._combo_text_rule.currentIndexChanged.connect(
+            lambda _i: self._actualizar_aviso_regla()
         )
         self._row_text_rule = self._f_dyn.addRow("Regla de texto:", self._combo_text_rule)
 
@@ -869,6 +886,7 @@ class PropertiesPanel(QWidget):
         self._f_dyn.setRowVisible(self._spin_circle_radius, False)
         self._f_dyn.setRowVisible(self._combo_text_rule, False)
         self._f_dyn.setRowVisible(self._combo_sibling, False)
+        self._f_dyn.setRowVisible(self._lbl_regla_aviso, False)
         # "Requerido para impresión" solo aplica a elementos que dependen de
         # los datos del registro; formas y fondos no dependen de él.
         depende_de_datos = elem_type in (
@@ -944,7 +962,8 @@ class PropertiesPanel(QWidget):
                 ridx = self._combo_text_rule.findData(rule_id)
                 self._combo_text_rule.setCurrentIndex(ridx if ridx >= 0 else 0)
                 self._combo_text_rule.blockSignals(False)
-                
+                self._actualizar_aviso_regla()
+
             if elem_type == "composite":
                 self._f_dyn.setRowVisible(self._edit_composite, True)
                 self._edit_composite.setText(props.get("composite_template", ""))
@@ -1032,6 +1051,44 @@ class PropertiesPanel(QWidget):
         self.property_changed.emit("render_as", value)
         if self._current_element:
             self.update_properties(self._current_element)
+
+    # Ejemplo con el que se sugiere corregir el dato de prueba, por regla.
+    _EJEMPLOS_REGLA: dict[str, str] = {
+        "segundo_nombre": "Juan Carlos",
+        "tercer_nombre": "Ana María José",
+        "apellido_paterno": "Pérez López",
+        "apellido_materno": "Pérez López",
+        "nombre_apellido": "Juan Carlos Pérez López",
+    }
+
+    def _actualizar_aviso_regla(self) -> None:
+        """Avisa si la regla no produce nada con el dato de prueba actual.
+
+        El caso típico: "solo el segundo nombre" sobre un dato de prueba de una
+        sola palabra. El resultado vacío es correcto —ese nombre no existe—,
+        pero en el diseñador dejaba el elemento invisible sin explicar por qué.
+        """
+        from credencializacion.services.text_rules import apply_text_rule
+
+        muestra = self._edit_test_text.text().strip()
+        regla = self._combo_text_rule.currentData() or ""
+
+        if not muestra or not regla or apply_text_rule(muestra, regla):
+            # Se limpia además de ocultarse: si no, al reaparecer la fila
+            # podría alcanzar a verse el aviso del elemento anterior.
+            self._lbl_regla_aviso.setText("")
+            self._lbl_regla_aviso.setVisible(False)
+            self._f_dyn.setRowVisible(self._lbl_regla_aviso, False)
+            return
+
+        etiqueta = self._combo_text_rule.currentText()
+        ejemplo = self._EJEMPLOS_REGLA.get(regla)
+        mensaje = f"«{etiqueta}» no encuentra ese dato en «{muestra}»."
+        if ejemplo:
+            mensaje += f" Prueba con algo como «{ejemplo}»."
+        self._lbl_regla_aviso.setText(mensaje)
+        self._lbl_regla_aviso.setVisible(True)
+        self._f_dyn.setRowVisible(self._lbl_regla_aviso, True)
 
     def set_available_attributes(self, attributes: list[str]) -> None:
         pass

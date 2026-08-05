@@ -119,6 +119,14 @@ class GraphicElement(QGraphicsItem):
             from credencializacion.services.text_rules import apply_text_rule
             color = QColor(props.get("color", "#171A2B"))
             texto = apply_text_rule(test_text, props.get("text_rule", ""))
+            if not texto:
+                # La regla no encuentra qué extraer del dato de muestra (p. ej.
+                # "solo el segundo nombre" sobre "Juan"). Dejar el elemento en
+                # blanco escondería su posición y tamaño justo cuando se está
+                # diseñando, así que se avisa en su lugar. Al imprimir, el
+                # valor vacío sí se respeta.
+                color = QColor("#EA580C")
+                texto = "⚠ la regla no aplica"
         elif elem_type == "composite":
             # Texto compuesto: mostrar la plantilla o una muestra
             tmpl = props.get("composite_template", "")
