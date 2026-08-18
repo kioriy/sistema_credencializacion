@@ -332,11 +332,23 @@ class MiEscuelaAdapter(DataAdapter):
         for i, persona in enumerate(authorized, start=1):
             if not isinstance(persona, dict):
                 continue
-            # ID del autorizado con prefijo "A" (requisito del sistema de
-            # monitor): el API entrega `authorized_person_id` (ej. 2162) y se
-            # almacena como "A2162". Vacío si el API no trae el id.
+            # Código del autorizado con prefijo "A" (requisito del sistema de
+            # monitor). Vacío si el API no trae nada utilizable.
+            #
+            # `authorized_code_ids` llega ya listo para imprimir y puede cubrir
+            # varios vínculos ("A4029.4030"): la misma persona recogiendo a dos
+            # hermanos con una sola tarjeta. Se prefiere cuando viene, porque el
+            # servidor es quien sabe qué alumnos son de la misma familia.
+            #
+            # Si el API no lo manda (versión anterior), se cae al comportamiento
+            # de siempre: "A" + `authorized_person_id` (ej. 2162 -> "A2162"),
+            # que ampara a un solo alumno.
+            codigo = persona.get("authorized_code_ids")
             aut_id = persona.get("authorized_person_id")
-            record[f"autorizado_{i}_id"] = f"A{aut_id}" if aut_id not in (None, "") else ""
+            if codigo not in (None, ""):
+                record[f"autorizado_{i}_id"] = str(codigo)
+            else:
+                record[f"autorizado_{i}_id"] = f"A{aut_id}" if aut_id not in (None, "") else ""
             record[f"autorizado_{i}_nombre"] = persona.get("full_name", "") or ""
             record[f"autorizado_{i}_telefono"] = persona.get("phone", "") or ""
             record[f"autorizado_{i}_parentesco"] = persona.get("relationship", "") or ""
