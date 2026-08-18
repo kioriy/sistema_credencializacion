@@ -256,8 +256,19 @@ def _migrate_plantilla_base() -> None:
                     if not old:
                         continue
                     op = Path(old)
-                    # Ya apunta a la carpeta estable y existe: nada que hacer.
-                    if op.exists() and op.parent.resolve() == dest.resolve():
+                    # Ya vive DENTRO del árbol de plantilla_base (raíz plana o
+                    # subcarpeta por escuela ``cliente_<id>``): es una ruta válida
+                    # y aislada; no tocar. Reescribirla a la raíz plana colapsaría
+                    # el aislamiento por escuela y, al reabrir la app, la imagen
+                    # base se cambiaría por la de otra escuela con el mismo nombre
+                    # de archivo.
+                    try:
+                        within_tree = (
+                            op.exists() and dest.resolve() in op.resolve().parents
+                        )
+                    except Exception:  # noqa: BLE001
+                        within_tree = False
+                    if within_tree:
                         continue
                     target = dest / op.name
                     # Si la imagen original aún existe fuera de dest, copiarla.
