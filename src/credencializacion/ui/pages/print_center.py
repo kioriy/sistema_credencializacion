@@ -188,6 +188,7 @@ class PrintCenter(QWidget):
         self._mark_workers: list = []
         self._render_worker = None
         self._render_on_done = None
+        self._compose_worker = None
         # (cara, impresora) pendiente cuando se regenera antes de imprimir.
         self._pending_print: tuple = (None, None)
         # Selectores del toolbar (inyectados por MainWindow).
@@ -320,6 +321,29 @@ class PrintCenter(QWidget):
         lbl.setFont(QFont("Inter", 13, QFont.Weight.Bold))
         lbl.setStyleSheet(f"color: {TEXT_DARK}; border: none;")
         layout.addWidget(lbl)
+
+        # Botón: crear una cola desde una carpeta de diseños ya terminados.
+        btn_from_folder = QPushButton()
+        btn_from_folder.setIcon(qta.icon("fa5s.folder-open", color="#FFFFFF"))
+        btn_from_folder.setIconSize(QSize(14, 14))
+        btn_from_folder.setText("  Nueva desde carpeta")
+        btn_from_folder.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        btn_from_folder.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {PRIMARY};
+                border: none;
+                border-radius: 6px;
+                padding: 8px;
+                color: #FFFFFF;
+                font-size: 12px;
+                font-weight: 600;
+            }}
+            QPushButton:hover {{ background-color: #E04848; }}
+            QPushButton:disabled {{ background-color: {BORDER}; color: {TEXT_LIGHT}; }}
+        """)
+        btn_from_folder.clicked.connect(self._compose_from_folder)
+        layout.addWidget(btn_from_folder)
+        self._btn_from_folder = btn_from_folder
 
         # Lista
         self._queue_list = QListWidget()
@@ -984,6 +1008,93 @@ class PrintCenter(QWidget):
             _on_copy_done,
         )
 
+    def _compose_from_folder(self) -> None:
+        """Crea una cola a partir de una carpeta de diseños ya terminados.
+
+        El cliente entrega las credenciales como imágenes (subcarpetas
+        ``frente/`` y opcional ``vuelta/``). Se componen los PDFs con la
+        calibración de la charola y se guardan como una cola imprimible, sin
+        registros ni plantilla del sistema.
+        """
+        if self._render_worker is not None or self._compose_worker is not None:
+            self.set_status("⏳ Ya hay una generación en curso...", "warning", toast=False)
+            return
+
+        from credencializacion.core.settings import AppSettings
+        from credencializacion.ui.dialogs.folder_compose_dialog import FolderComposeDialog
+
+        perfiles = AppSettings.list_position_profiles()
+        dlg = FolderComposeDialog(perfiles, self._selected_profile_name() or None, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        vals = dlg.result_values()
+        sides = vals["sides"]
+        if sides is None or sides.mode == "empty" or not sides.fronts:
+            self.set_status("⚠️ La carpeta no tiene imágenes de frente.", "warning")
+            return
+
+        # Si los conteos de frente/vuelta no coinciden, confirmar antes de seguir.
+        if sides.mode == "mismatch":
+            resp = QMessageBox.question(
+                self, "Frentes y vueltas no coinciden",
+                f"{sides.warning}\n\n¿Continuar de todas formas?",
+            )
+            if resp != QMessageBox.StandardButton.Yes:
+                return
+
+        perfil_name = vals["perfil_name"]
+        perfil = AppSettings.get_position_profile(perfil_name) if perfil_name else None
+
+        # Crear la cola (sin ítems) para tener un id y su carpeta de PDFs.
+        from credencializacion.db.engine import DatabaseSession
+        from credencializacion.db.models import ColaImpresion
+
+        try:
+            with DatabaseSession() as session:
+                cola = ColaImpresion(
+                    nombre=vals["nombre"],
+                    total_registros=sides.n_front,
+                    perfil_posicion=perfil_name or None,
+                )
+                session.add(cola)
+                session.flush()
+                cola_id = cola.id
+                session.commit()
+        except Exception as e:  # noqa: BLE001
+            self.set_status(f"❌ Error al crear la cola: {e}", "error")
+            return
+
+        from credencializacion.utils.paths import get_cola_pdf_dir
+        from credencializacion.ui.render_worker import FolderComposeWorker
+
+        self.refresh_queues()
+        self.set_status("🗂 Componiendo PDFs desde la carpeta...", "info", toast=False)
+
+        worker = FolderComposeWorker(
+            sides, str(get_cola_pdf_dir(cola_id)),
+            vals["card_w_cm"], vals["card_h_cm"], vals["rotate"], perfil,
+        )
+        self._compose_worker = worker
+        self._set_render_buttons_enabled(False)
+
+        def _done(frentes: str, vueltas: str) -> None:
+            self._selected_cola_id = cola_id
+            self._on_queue_pdfs_ready(
+                cola_id, frentes, vueltas, "✅ PDFs compuestos desde carpeta"
+            )
+
+        worker.progress.connect(lambda m: self.set_status(m, "info", toast=False))
+        worker.finished_ok.connect(_done)
+        worker.failed.connect(
+            lambda msg: self.set_status(f"❌ Error al componer: {msg}", "error")
+        )
+        worker.finished.connect(self._cleanup_compose_worker)
+        worker.start()
+
+    def _cleanup_compose_worker(self) -> None:
+        self._compose_worker = None
+        self._set_render_buttons_enabled(True)
+
     def _on_queue_pdfs_ready(
         self, cola_id: int, frentes_pdf: str, vueltas_pdf: str, mensaje: str,
         then_print: bool = False,
@@ -1089,7 +1200,7 @@ class PrintCenter(QWidget):
 
     def _set_render_buttons_enabled(self, enabled: bool) -> None:
         # Actualizar/Copiar viven en el toolbar (inyectados por MainWindow).
-        for attr in ("_tb_btn_update", "_tb_btn_copy"):
+        for attr in ("_tb_btn_update", "_tb_btn_copy", "_btn_from_folder"):
             btn = getattr(self, attr, None)
             if btn is not None:
                 btn.setEnabled(enabled)
@@ -1129,7 +1240,7 @@ class PrintCenter(QWidget):
         from credencializacion.core.settings import AppSettings
         from credencializacion.core.printer import print_pdf
         from credencializacion.db.engine import DatabaseSession
-        from credencializacion.db.models import ColaImpresion
+        from credencializacion.db.models import ColaImpresion, ItemCola
 
         if not self._selected_cola_id:
             self.set_status("⚠️ Selecciona una cola primero", "warning")
@@ -1149,11 +1260,18 @@ class PrintCenter(QWidget):
                 return
             pdf_path = cola.pdf_frente_path if cara == "frente" else cola.pdf_vuelta_path
             perfil_cola = cola.perfil_posicion or ""
+            # Las colas compuestas desde carpeta no tienen registros: sus PDFs no
+            # se pueden regenerar (no hay plantilla ni ítems), así que se imprimen
+            # tal cual, sin ofrecer regenerar por perfil.
+            tiene_items = (
+                session.query(ItemCola).filter_by(cola_id=cola.id).first() is not None
+            )
 
         # Req 5: si la impresora tiene un perfil distinto al de la cola, ofrecer
-        # regenerar con el perfil de esa impresora antes de imprimir.
+        # regenerar con el perfil de esa impresora antes de imprimir. Solo aplica
+        # a colas basadas en registros (las de carpeta se imprimen tal cual).
         perfil_impresora = AppSettings.get_profile_for_printer(printer)
-        if perfil_impresora and perfil_impresora != perfil_cola:
+        if tiene_items and perfil_impresora and perfil_impresora != perfil_cola:
             resp = QMessageBox.question(
                 self, "Perfil distinto",
                 f"La cola se generó con el perfil «{perfil_cola or '—'}» pero la "

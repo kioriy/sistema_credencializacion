@@ -1588,6 +1588,61 @@ class ControlPanel(QWidget):
 
     # ── Prefetch de fotos en segundo plano ──────────────────────────
 
+    def _on_refresh_photos(self) -> None:
+        """Limpia el caché de fotos del cliente actual y las re-descarga.
+
+        Borra los archivos en disco (caché por URL) y la caché en memoria de las
+        fotos de los registros cargados, luego relanza el prefetch. Úsalo si una
+        foto quedó desactualizada, corrupta o no cargó.
+        """
+        from PySide6.QtWidgets import QMessageBox
+
+        records = getattr(self, "_all_records", []) or []
+        urls = {
+            r.photo_path
+            for r in records
+            if getattr(r, "photo_path", "") and str(r.photo_path).startswith("http")
+        }
+        if not urls:
+            self.set_status(
+                "⚠️ No hay fotos que actualizar (selecciona una escuela primero).",
+                "warning",
+            )
+            return
+
+        resp = QMessageBox.question(
+            self,
+            "Actualizar fotos",
+            f"Se borrarán del caché {len(urls)} foto(s) y se volverán a "
+            "descargar del servidor.\n\nÚsalo si alguna foto se ve "
+            "desactualizada o no carga. ¿Continuar?",
+        )
+        if resp != QMessageBox.StandardButton.Yes:
+            return
+
+        # Detener el prefetch en curso antes de borrar (las tareas en vuelo que
+        # alcancen a reescribir un archivo solo lo dejan con contenido fresco).
+        prev = getattr(self, "_prefetch_worker", None)
+        if prev is not None:
+            prev.stop()
+
+        from credencializacion.adapters.image_cache import clear_url_cache
+
+        borradas = clear_url_cache(urls)
+        try:
+            self._raw_photo_cache.clear()
+        except Exception:  # noqa: BLE001
+            pass
+
+        self.set_status(
+            f"🧹 {borradas} foto(s) limpiadas del caché. Re-descargando...",
+            "info", toast=False,
+        )
+        # Relanzar el prefetch (reemplaza el worker anterior) y refrescar la
+        # página: las fotos aparecerán conforme se re-descarguen.
+        self._start_photo_prefetch(records)
+        self._refresh_page()
+
     def _start_photo_prefetch(self, records: list["Registro"]) -> None:
         """Descarga a disco todas las fotos http del cliente (sin bloquear).
 
@@ -2004,13 +2059,13 @@ class ControlPanel(QWidget):
         """Ruta de caché en disco para una URL de foto (nombre = hash de la URL).
 
         La caché persiste entre sesiones, así que las fotos no se re-descargan
-        cada vez: es la causa principal de la lentitud de carga.
+        cada vez: es la causa principal de la lentitud de carga. Delega en el
+        helper compartido para que el motor de PDF reutilice EXACTAMENTE estos
+        mismos archivos (si las claves divergieran, la impresión volvería a
+        depender de la red y algunas fotos saldrían en blanco al azar).
         """
-        import hashlib
-        from pathlib import Path
-        from credencializacion.utils.paths import get_image_cache_dir
-        nombre = hashlib.sha1(url.encode("utf-8")).hexdigest() + ".img"
-        return get_image_cache_dir() / nombre
+        from credencializacion.adapters.image_cache import photo_url_cache_path
+        return photo_url_cache_path(url)
 
     def _cache_photo(self, url: str, pixmap: "QPixmap") -> None:
         """Guarda el pixmap en memoria (raw + circular)."""

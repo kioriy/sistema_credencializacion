@@ -619,46 +619,36 @@ class PDFEngine:
         return None
 
     def _download_image(self, url: str) -> str | None:
-        """Descarga una imagen desde URL y la guarda en caché temporal.
+        """Resuelve una URL de imagen a un archivo local reutilizando la caché.
+
+        Usa la MISMA caché persistente por URL que el panel de control (que ya
+        precargó todas las fotos del cliente), por lo que al renderizar no se
+        depende de la red: un fallo de descarga intermitente ya no deja fotos en
+        blanco al azar. Si la foto aún no está en caché, se descarga con
+        reintentos y se guarda para las siguientes veces.
 
         Args:
             url: URL HTTP/HTTPS de la imagen.
 
         Returns:
-            Ruta local del archivo descargado, o None si falla.
+            Ruta local del archivo cacheado, o None si no se pudo obtener.
         """
-        import tempfile, urllib.request, urllib.error
+        from credencializacion.adapters.image_cache import fetch_photo_to_cache
 
-        # Clave de caché simple por URL
+        # Atajo en memoria dentro del mismo render (frente y vuelta comparten
+        # instancia de motor), para no golpear el disco por cada slot.
         if not hasattr(self, "_img_cache"):
             self._img_cache: dict[str, str] = {}
-        if url in self._img_cache:
-            cached = self._img_cache[url]
-            return cached if Path(cached).exists() else None
+        cached = self._img_cache.get(url)
+        if cached and Path(cached).exists():
+            return cached
 
-        try:
-            # Detectar extensión de la URL
-            ext = ".jpg"
-            for candidate in (".png", ".jpg", ".jpeg", ".gif", ".webp"):
-                if candidate in url.lower():
-                    ext = candidate
-                    break
-
-            fd, tmp_path = tempfile.mkstemp(suffix=ext, prefix="credencial_img_")
-            import os; os.close(fd)
-
-            # Timeout de 10 segundos
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                with open(tmp_path, "wb") as f:
-                    f.write(resp.read())
-
-            self._img_cache[url] = tmp_path
-            logger.info("Imagen descargada: %s -> %s", url, tmp_path)
-            return tmp_path
-        except Exception as e:
-            logger.warning("No se pudo descargar imagen '%s': %s", url, e)
+        dest = fetch_photo_to_cache(url)
+        if dest is None:
+            logger.warning("No se pudo obtener la imagen '%s' (caché ni red)", url)
             return None
+        self._img_cache[url] = str(dest)
+        return str(dest)
 
 
     def _draw_qr(

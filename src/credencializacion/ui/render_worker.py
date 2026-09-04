@@ -208,3 +208,54 @@ class QueueRenderWorker(QThread):
             extras_ok.append(extra)
 
         return items_ok, extras_ok, reporte
+
+
+class FolderComposeWorker(QThread):
+    """Compone en segundo plano los PDFs (frentes/vueltas) desde una carpeta.
+
+    Para diseños ya terminados que el cliente entrega como imágenes. No toca la
+    base de datos: solo lee las imágenes de la carpeta y arma los PDFs con la
+    calibración de la charola (perfil o global). Emite ``finished_ok`` con las
+    rutas (la de vueltas es cadena vacía cuando solo hay frentes).
+    """
+
+    progress = Signal(str)
+    finished_ok = Signal(str, str)  # frentes_pdf, vueltas_pdf ("" si no hay)
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        sides,
+        out_dir: str,
+        card_w_cm: float,
+        card_h_cm: float,
+        rotate: bool,
+        perfil: dict | None = None,
+    ) -> None:
+        super().__init__()
+        self._sides = sides
+        self._out_dir = out_dir
+        self._card_w_cm = card_w_cm
+        self._card_h_cm = card_h_cm
+        self._rotate = rotate
+        self._perfil = perfil
+
+    def run(self) -> None:  # noqa: D401
+        try:
+            from credencializacion.renderer.folder_compose import compose_from_folder
+
+            self.progress.emit("🖼 Componiendo PDF de frentes...")
+            frentes, vueltas = compose_from_folder(
+                self._sides,
+                self._out_dir,
+                card_w_cm=self._card_w_cm,
+                card_h_cm=self._card_h_cm,
+                rotate=self._rotate,
+                perfil=self._perfil,
+            )
+            if vueltas:
+                self.progress.emit("🖼 Componiendo PDF de vueltas...")
+            self.finished_ok.emit(frentes, vueltas or "")
+        except Exception as e:  # noqa: BLE001
+            logger.error("Error al componer PDFs desde carpeta: %s", e)
+            self.failed.emit(str(e))

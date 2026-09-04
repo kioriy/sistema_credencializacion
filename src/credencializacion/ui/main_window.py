@@ -137,6 +137,7 @@ class MainWindow(QMainWindow):
         self.btn_preview.clicked.connect(self._control_panel._on_preview)
         self.btn_add_queue.clicked.connect(self._control_panel._add_selected_to_queue)
         self.btn_sync.clicked.connect(self._on_sync_clicked)
+        self.btn_refresh_photos.clicked.connect(self._control_panel._on_refresh_photos)
         # El panel deshabilita este botón mientras la sincronización corre
         self._control_panel.btn_sync_api = self.btn_sync
 
@@ -232,6 +233,17 @@ class MainWindow(QMainWindow):
         tb_layout.addWidget(self.btn_add_queue)
 
         tb_layout.addWidget(self.btn_sync)
+
+        # Actualizar fotos: limpia el caché de fotos de la escuela y las
+        # re-descarga. Ícono de cámara (alusivo a foto).
+        self.btn_refresh_photos = self._make_toolbar_btn(
+            "fa5s.camera", "Actualizar fotos", primary=False
+        )
+        self.btn_refresh_photos.setToolTip(
+            "Borra del caché las fotos de esta escuela y las vuelve a descargar."
+        )
+        tb_layout.addWidget(self.btn_refresh_photos)
+
         tb_layout.addStretch()
         self._toolbar_stack.addWidget(tb_control)
 

@@ -8,9 +8,13 @@ renderizado.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
+import os
+import time
 from pathlib import Path
 from typing import Any, Callable
+from uuid import uuid4
 
 import requests
 from PIL import Image
@@ -18,6 +22,96 @@ from PIL import Image
 from credencializacion.utils.paths import get_image_cache_dir
 
 logger = logging.getLogger(__name__)
+
+
+# ── Caché persistente por URL (compartida con el prefetch del panel) ──────────
+#
+# El panel de control descarga TODAS las fotos del cliente a esta caché en disco
+# y las muestra desde ahí; por eso ahí siempre se ven bien. El motor de PDF debe
+# usar EXACTAMENTE la misma clave para reutilizar esos archivos y no depender de
+# la red al renderizar (que es la causa de que algunas fotos salgan en blanco de
+# forma aleatoria en la impresión).
+
+def photo_url_cache_path(url: str) -> Path:
+    """Ruta de caché en disco de una foto, con nombre = ``sha1(url).img``.
+
+    Misma clave y carpeta que usa el prefetch del panel de control, para que el
+    motor de PDF reutilice los archivos ya descargados.
+    """
+    nombre = hashlib.sha1(url.encode("utf-8")).hexdigest() + ".img"
+    return get_image_cache_dir() / nombre
+
+
+def fetch_photo_to_cache(
+    url: str,
+    *,
+    retries: int = 3,
+    timeout: tuple[int, int] = (10, 30),
+) -> Path | None:
+    """Devuelve la ruta local de una foto por URL, descargándola si falta.
+
+    Reutiliza la caché persistente por URL. Si ya está en disco (p. ej. porque el
+    panel de control ya la precargó), NO toca la red. Si falta, la descarga con
+    reintentos y la escribe de forma atómica (temporal único + ``replace``) para
+    que un lector nunca vea un archivo a medio escribir ni dos escritores pisen
+    el mismo temporal. Devuelve ``None`` si no se pudo obtener.
+    """
+    if not url:
+        return None
+    dest = photo_url_cache_path(url)
+    try:
+        if dest.exists() and dest.stat().st_size > 0:
+            return dest
+    except OSError:
+        pass
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    return _download_with_retries(url, dest, retries, timeout)
+
+
+def clear_url_cache(urls) -> int:
+    """Borra de la caché por URL los archivos de las URLs dadas.
+
+    Se usa para forzar la re-descarga de fotos (p. ej. si una quedó
+    desactualizada o corrupta). Devuelve cuántos archivos se eliminaron.
+    """
+    count = 0
+    for url in urls:
+        if not url:
+            continue
+        path = photo_url_cache_path(str(url))
+        try:
+            if path.exists():
+                path.unlink()
+                count += 1
+        except OSError as e:  # noqa: PERF203
+            logger.warning("No se pudo borrar del caché %s: %s", path, e)
+    return count
+
+
+def _download_with_retries(url, dest, retries, timeout):
+    """Descarga ``url`` a ``dest`` (atómico) con reintentos. None si falla."""
+    for intento in range(1, retries + 1):
+        try:
+            resp = requests.get(
+                url, timeout=timeout, headers={"User-Agent": "Mozilla/5.0"}
+            )
+            resp.raise_for_status()
+            data = resp.content
+            if not data:
+                raise ValueError("respuesta vacía")
+            tmp = dest.with_name(f"{dest.name}.{os.getpid()}.{uuid4().hex}.part")
+            tmp.write_bytes(data)
+            tmp.replace(dest)
+            return dest
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "Descarga de foto falló (intento %d/%d) %s: %s",
+                intento, retries, url, e,
+            )
+            if intento < retries:
+                time.sleep(0.5 * intento)
+    return None
 
 # ── Configuración ────────────────────────────────────────────────────
 _MAX_DIMENSION = 800       # px, lado mayor máximo

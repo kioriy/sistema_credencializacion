@@ -436,20 +436,28 @@ class TemplateManager(QWidget):
         source_id = self._plantilla_ids[row]
         nombre = self._table.item(row, 0).text()
 
-        # Verificar que no sea el mismo cliente
+        # Copiar dentro de la misma escuela esta permitido (p. ej. partir del
+        # diseno de alumno para crear el de tutor con pocos cambios).
         src_client_id = self._combo_clients.currentData()
-        if src_client_id == dest_id:
-            self.set_status("\u26a0 El cliente origen y destino son el mismo.", "warning")
-            return
+        same_school = src_client_id == dest_id
+        dest_name = self._combo_dest.currentText()
+
+        if same_school:
+            detalle = (
+                "Se crear\u00e1 un duplicado en la MISMA escuela (se agrega "
+                "\u00ab(copia)\u00bb al nombre). La imagen base s\u00ed se conserva."
+            )
+        else:
+            detalle = (
+                "La imagen base (plantilla base) NO se copia entre escuelas: "
+                "c\u00e1rgala desde el editor para que no compartan el mismo "
+                "archivo de fondo."
+            )
 
         reply = QMessageBox.question(
             self,
             "Confirmar copia",
-            f"\u00bfCopiar \u00ab{nombre}\u00bb al cliente "
-            f"\u00ab{self._combo_dest.currentText()}\u00bb?\n\n"
-            "La imagen base (plantilla base) NO se copia: cada escuela debe "
-            "cargar la suya desde el editor para que no compartan el mismo "
-            "archivo de fondo.",
+            f"\u00bfCopiar \u00ab{nombre}\u00bb a \u00ab{dest_name}\u00bb?\n\n{detalle}",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
@@ -466,30 +474,50 @@ class TemplateManager(QWidget):
                 self.set_status("\u274c No se encontró la plantilla original.", "error")
                 return
 
+            nuevo_nombre = self._unique_nombre(session, dest_id, original.nombre)
+
+            if same_school:
+                # Misma escuela: el fondo vive en la carpeta de ESTA escuela, asi
+                # que conservarlo es seguro y practico (variacion pequena entre,
+                # p. ej., alumno y tutor).
+                elem_frente = copy.deepcopy(original.elementos_frente)
+                elem_vuelta = copy.deepcopy(original.elementos_vuelta)
+                recursos = copy.deepcopy(original.recursos)
+            else:
+                # Entre escuelas: se omite la imagen base para no compartir el
+                # mismo archivo de fondo (se recarga en el editor).
+                elem_frente = self._strip_base_images(original.elementos_frente)
+                elem_vuelta = self._strip_base_images(original.elementos_vuelta)
+                recursos = self._strip_fondo(original.recursos)
+
             nueva = Plantilla(
                 cliente_id=dest_id,
-                nombre=original.nombre,
+                nombre=nuevo_nombre,
                 tipo=original.tipo,
                 orientacion=original.orientacion,
                 ancho=original.ancho,
                 alto=original.alto,
-                # Se omite la imagen base al copiar: las rutas de fondo apuntan a
-                # archivos por escuela y compartirlas hacia que editar/subir el
-                # fondo de una escuela pisara el de otras. El usuario recarga la
-                # plantilla base en el editor para cada copia.
-                elementos_frente=self._strip_base_images(original.elementos_frente),
-                elementos_vuelta=self._strip_base_images(original.elementos_vuelta),
+                elementos_frente=elem_frente,
+                elementos_vuelta=elem_vuelta,
                 posiciones_hoja=copy.deepcopy(original.posiciones_hoja),
-                recursos=self._strip_fondo(original.recursos),
+                recursos=recursos,
             )
             session.add(nueva)
             session.commit()
 
-        dest_name = self._combo_dest.currentText()
-        self.set_status(
-            f"\u2705 \u00ab{nombre}\u00bb copiada a \u00ab{dest_name}\u00bb. "
-            "Carga su plantilla base en el editor.", "success"
-        )
+        if same_school:
+            self.set_status(
+                f"\u2705 \u00ab{nombre}\u00bb duplicada como \u00ab{nuevo_nombre}\u00bb.", "success"
+            )
+        else:
+            self.set_status(
+                f"\u2705 \u00ab{nombre}\u00bb copiada a \u00ab{dest_name}\u00bb como \u00ab{nuevo_nombre}\u00bb. "
+                "Carga su plantilla base en el editor.", "success"
+            )
+
+        # Si la copia cayo en la escuela que se esta viendo, refrescar la tabla.
+        if dest_id == self._combo_clients.currentData():
+            self._load_templates(dest_id)
 
     @staticmethod
     def _strip_base_images(elementos: list | None) -> list:
@@ -514,6 +542,29 @@ class TemplateManager(QWidget):
             for k, v in (recursos or {}).items()
             if k not in ("fondo_frente", "fondo_vuelta")
         }
+
+    @staticmethod
+    def _unique_nombre(session, cliente_id: int, base: str) -> str:
+        """Devuelve un nombre único dentro del cliente destino.
+
+        Si ``base`` no existe en ese cliente, se usa tal cual. Si existe (p. ej.
+        al copiar dentro de la misma escuela), se agrega «(copia)», «(copia 2)»,
+        «(copia 3)»… hasta encontrar uno libre.
+        """
+        from credencializacion.db.models import Plantilla
+        existentes = {
+            n for (n,) in session.query(Plantilla.nombre)
+            .filter_by(cliente_id=cliente_id).all()
+        }
+        if base not in existentes:
+            return base
+        candidato = f"{base} (copia)"
+        if candidato not in existentes:
+            return candidato
+        i = 2
+        while f"{base} (copia {i})" in existentes:
+            i += 1
+        return f"{base} (copia {i})"
 
     # ── Status bar ─────────────────────────────────────────────────
 
