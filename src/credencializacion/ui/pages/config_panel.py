@@ -241,6 +241,42 @@ class ConfigPanel(QWidget):
         self.dictionary_group = AttributeDictionaryGroup()
         layout.addWidget(self.dictionary_group)
 
+        # Grupo: Rutas del sistema (índice de carpetas base + abrir)
+        paths_group = QGroupBox("Rutas del sistema")
+        paths_layout = QVBoxLayout(paths_group)
+
+        help_paths = self._make_help_label(
+            "Carpetas donde la aplicación guarda sus datos. Usa «Abrir» para "
+            "llegar a ellas en el explorador de archivos. En «Fotos locales "
+            "(Google Sheets)» coloca las fotos de cada escuela, en la subcarpeta "
+            "con su nombre.",
+            lines=3,
+        )
+        paths_layout.addWidget(help_paths)
+
+        from credencializacion.utils.paths import app_base_paths
+
+        for label_text, ruta in app_base_paths():
+            fila = QHBoxLayout()
+            lbl = QLabel(label_text)
+            lbl.setMinimumWidth(220)
+            fila.addWidget(lbl)
+
+            campo = QLineEdit(str(ruta))
+            campo.setReadOnly(True)
+            fila.addWidget(campo, stretch=1)
+
+            btn_abrir = QPushButton("Abrir")
+            btn_abrir.setProperty("variant", "secondary")
+            btn_abrir.clicked.connect(
+                lambda _checked=False, p=str(ruta): self._open_path(p)
+            )
+            fila.addWidget(btn_abrir)
+
+            paths_layout.addLayout(fila)
+
+        layout.addWidget(paths_group)
+
         # Acciones
         actions_layout = QHBoxLayout()
         actions_layout.addStretch()
@@ -478,6 +514,23 @@ class ConfigPanel(QWidget):
             self.sheets_service_email.setText(email or "—")
         except Exception as e:  # noqa: BLE001
             self.sheets_service_email.setText(f"⚠ No se pudo leer el archivo: {e}")
+
+    def _open_path(self, path: str) -> None:
+        """Abre una carpeta base en el explorador de archivos del sistema.
+
+        Crea la carpeta si aún no existe para que «Abrir» nunca falle en la
+        primera vez.
+        """
+        from pathlib import Path
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+
+        carpeta = Path(path)
+        try:
+            carpeta.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(carpeta)))
 
     def _on_page_size_changed(self, index: int) -> None:
         if index == 0: # A4

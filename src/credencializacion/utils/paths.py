@@ -389,3 +389,64 @@ def get_cola_pdf_dir(cola_id: int | None = None) -> Path:
         base = base / str(cola_id)
     base.mkdir(parents=True, exist_ok=True)
     return base
+
+
+def _safe_folder_name(nombre: str) -> str:
+    """Nombre de carpeta legible y válido a partir del nombre de un cliente.
+
+    A diferencia de ``_slugify`` (que aplasta a minúsculas y guiones bajos),
+    conserva mayúsculas y espacios para que el usuario reconozca la carpeta de
+    su escuela; solo sustituye los caracteres ilegales en el sistema de archivos.
+    """
+    import re
+
+    base = (nombre or "cliente").strip()
+    base = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", base)
+    base = base.strip(" .") or "cliente"
+    return base[:100]
+
+
+def get_sheets_local_photos_dir(cliente_nombre: str | None = None) -> Path:
+    """Carpeta local de fotos para clientes de Google Sheets (build-safe).
+
+    Estructura: ``<datos>/sheets_local_fotos/<nombre_cliente>/``. El usuario
+    coloca ahí las fotos (una por registro) y en el Sheet solo va el nombre del
+    archivo; al sincronizar se une esta carpeta con ese nombre para formar la
+    ruta local de ``Registro.photo_path``. Crea el directorio si no existe.
+    """
+    base = get_data_dir() / "sheets_local_fotos"
+    if cliente_nombre:
+        base = base / _safe_folder_name(cliente_nombre)
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
+def resolve_local_photo_path(base_dir: Path, value: str) -> str:
+    """Convierte el valor de la columna de foto en una ruta local.
+
+    - Vacío → ``""``.
+    - Ruta absoluta → se respeta tal cual (el usuario puso la ruta completa).
+    - Nombre de archivo o subruta relativa → ``base_dir / value``.
+
+    No comprueba existencia: la resolución final la hacen el render y la tabla
+    (``Path.exists()``), así que colocar la foto después también funciona.
+    """
+    v = (value or "").strip()
+    if not v:
+        return ""
+    p = Path(v)
+    if p.is_absolute():
+        return str(p)
+    return str(base_dir / v)
+
+
+def app_base_paths() -> list[tuple[str, Path]]:
+    """Rutas base del sistema, para listarlas y abrirlas desde Configuración."""
+    return [
+        ("Datos de la aplicación", get_data_dir()),
+        ("Plantillas base (fondos)", get_plantilla_base_dir()),
+        ("Fotos locales (Google Sheets)", get_sheets_local_photos_dir()),
+        ("Caché de imágenes", get_image_cache_dir()),
+        ("PDFs de colas de impresión", get_cola_pdf_dir()),
+        ("Credenciales", get_credentials_dir()),
+    ]

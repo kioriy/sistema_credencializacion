@@ -158,19 +158,42 @@ class SheetsSyncWorker(QThread):
                     datos["enrollment_code"] = key
                     raw_records.append(datos)
 
+                # Columna de foto: se detecta por nombre (foto/photo/imagen…) o
+                # por valor. Su contenido es el NOMBRE del archivo local; se une
+                # a la carpeta de fotos de la escuela para formar la ruta de
+                # `photo_path` (ver get_sheets_local_photos_dir).
+                from credencializacion.utils.images import detect_image_attributes
+                from credencializacion.utils.paths import (
+                    get_sheets_local_photos_dir,
+                    resolve_local_photo_path,
+                )
+
+                image_cols = detect_image_attributes(raw_records)
+                image_col = image_cols[0] if image_cols else None
+                fotos_dir = (
+                    get_sheets_local_photos_dir(nombre_cliente) if image_col else None
+                )
+
                 for rec_data in raw_records:
                     key = rec_data["enrollment_code"]
+                    photo_path = ""
+                    if image_col and fotos_dir is not None:
+                        photo_path = resolve_local_photo_path(
+                            fotos_dir, str(rec_data.get(image_col, "") or "")
+                        )
                     existing_reg = session.query(Registro).filter_by(
                         cliente_id=cliente_id, enrollment_code=key,
                     ).first()
                     if existing_reg:
                         existing_reg.datos = rec_data
+                        existing_reg.photo_path = photo_path
                     else:
                         session.add(
                             Registro(
                                 cliente_id=cliente_id,
                                 datos=rec_data,
                                 enrollment_code=key,
+                                photo_path=photo_path,
                                 estado_impresion="pendiente",
                             )
                         )
