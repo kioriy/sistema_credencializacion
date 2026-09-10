@@ -425,6 +425,7 @@ def resolve_local_photo_path(base_dir: Path, value: str) -> str:
     """Convierte el valor de la columna de foto en una ruta local.
 
     - Vacío → ``""``.
+    - URL http(s) → se respeta (el render la descarga como en el flujo API).
     - Ruta absoluta → se respeta tal cual (el usuario puso la ruta completa).
     - Nombre de archivo o subruta relativa → ``base_dir / value``.
 
@@ -434,6 +435,8 @@ def resolve_local_photo_path(base_dir: Path, value: str) -> str:
     v = (value or "").strip()
     if not v:
         return ""
+    if v.startswith(("http://", "https://")):
+        return v
     p = Path(v)
     if p.is_absolute():
         return str(p)

@@ -73,3 +73,23 @@ def detect_image_attributes(records: list[dict]) -> list[str]:
         if is_image_attribute(key) or key in by_value:
             result.append(key)
     return result
+
+
+def apply_local_photos(records: list[dict], image_cols: list[str], fotos_dir) -> None:
+    """Convierte in situ las columnas de imagen en rutas locales absolutas.
+
+    Para clientes de Google Sheets, el valor de cada columna de imagen es el
+    NOMBRE del archivo (p. ej. ``juan.jpeg``). Esta función lo reemplaza por la
+    ruta local ``fotos_dir / nombre`` (o respeta URLs y rutas absolutas), de modo
+    que el diseñador y el render —que enlazan la foto por atributo— la resuelvan.
+    No hace nada si no hay columnas de imagen o carpeta.
+    """
+    if not image_cols or fotos_dir is None:
+        return
+    from credencializacion.utils.paths import resolve_local_photo_path
+
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        for col in image_cols:
+            rec[col] = resolve_local_photo_path(fotos_dir, str(rec.get(col, "") or ""))

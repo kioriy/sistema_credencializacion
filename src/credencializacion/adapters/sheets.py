@@ -307,6 +307,42 @@ def open_spreadsheet_by_name(client, document_name: str):
         )
 
 
+def read_worksheet_records(worksheet) -> list[dict]:
+    """Lee las filas de una pestaña TOLERANDO encabezados duplicados o vacíos.
+
+    ``gspread.get_all_records`` lanza un error si el encabezado tiene columnas
+    repetidas (o vacías), abortando la pestaña completa. Aquí se construyen los
+    registros a partir de la rejilla cruda (``get_all_values``): la primera fila
+    es el encabezado; una columna sin nombre —o cuyo nombre ya apareció antes—
+    se ignora (gana la primera aparición). Los valores se devuelven como texto,
+    con cadena vacía para las celdas faltantes. Así una escuela con un encabezado
+    duplicado por accidente sí se sincroniza, en vez de quedar fuera.
+    """
+    values = worksheet.get_all_values()
+    if not values:
+        return []
+
+    encabezados = [str(h).strip() for h in values[0]]
+    usados: set[str] = set()
+    nombres: list[str | None] = []  # nombre a usar por columna, o None si se ignora
+    for h in encabezados:
+        if not h or h in usados:
+            nombres.append(None)
+        else:
+            usados.add(h)
+            nombres.append(h)
+
+    registros: list[dict] = []
+    for fila in values[1:]:
+        rec: dict[str, str] = {}
+        for nombre, celda in zip(nombres, fila):
+            if nombre is None:
+                continue
+            rec[nombre] = celda if celda is not None else ""
+        registros.append(rec)
+    return registros
+
+
 # ═════════════════════════════════════════════════════════════════════
 # GoogleSheetsAdapter — gspread
 # ═════════════════════════════════════════════════════════════════════

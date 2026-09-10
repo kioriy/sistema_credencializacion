@@ -435,11 +435,51 @@ class PDFEngine:
 
         Los atributos calculados fuera del registro (``_current_extra``, p. ej.
         las fotos de hermanos) tienen prioridad sobre ``registro.datos``.
+
+        La resolución del ``campo`` aplica el DICCIONARIO (``resolver``): el
+        diseñador canoniza las columnas del cliente (p. ej. ``folio`` o
+        ``Matrícula`` se muestran como «matricula»), así que un elemento queda
+        enlazado al nombre canónico. Sin el diccionario aquí, ese enlace no
+        encontraría la columna cruda de un cliente de Google Sheets (cuyas claves
+        NO se normalizan al sincronizar) y el campo saldría en blanco. La
+        resolución prueba primero la coincidencia exacta, por lo que es
+        retrocompatible con datos ya canónicos (flujo de la API).
         """
         extra = getattr(self, "_current_extra", None) or {}
         if campo in extra:
             return str(extra.get(campo, "") or "")
+
+        # Resolución por diccionario cuando hay acceso al dict crudo de datos y
+        # el índice está disponible; si no (stubs de prueba sin `.datos`, o BD
+        # sin catálogo), se cae a la lectura cruda por `get_dato` — el
+        # comportamiento previo, siempre seguro.
+        datos = getattr(registro, "datos", None)
+        idx = self._indice_dic()
+        if isinstance(datos, dict) and idx is not None:
+            try:
+                from credencializacion.services.diccionario import resolver
+                return str(resolver(datos, campo, "", idx) or "")
+            except Exception:  # noqa: BLE001
+                pass
         return str(registro.get_dato(campo, "") or "")
+
+    def _indice_dic(self):
+        """Índice del diccionario, cacheado por instancia de motor (o ``None``).
+
+        Se resuelve una sola vez por render (una cola puede tener cientos de
+        tarjetas × varios campos). Si el catálogo no está disponible (p. ej. BD
+        de prueba sin la tabla), devuelve ``None`` y el llamador usa la lectura
+        cruda.
+        """
+        idx = getattr(self, "_dic_indice", "unset")
+        if idx == "unset":
+            try:
+                from credencializacion.services.diccionario import obtener_indice
+                idx = obtener_indice()
+            except Exception:  # noqa: BLE001
+                idx = None
+            self._dic_indice = idx
+        return idx
 
     def _get_element_text(self, registro: "Registro", elem: dict, props: dict) -> str:
         """Resuelve el texto a renderizar, manejando atributos simples y compuestos."""

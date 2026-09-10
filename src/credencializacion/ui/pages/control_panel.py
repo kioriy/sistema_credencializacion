@@ -1837,6 +1837,15 @@ class ControlPanel(QWidget):
                 toast=True,
             )
 
+        duplicados = reporte.get("encabezados_duplicados") or []
+        if duplicados:
+            self.set_status(
+                "ℹ️ Encabezados repetidos (se usó la primera columna de cada "
+                f"nombre): {'; '.join(duplicados)}",
+                "info",
+                toast=True,
+            )
+
         self._sync_worker = None
 
 

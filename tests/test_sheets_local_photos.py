@@ -52,6 +52,37 @@ def test_resolver_ruta_absoluta_se_respeta(data_dir, tmp_path):
     assert P.resolve_local_photo_path(base, abs_path) == abs_path
 
 
+def test_resolver_url_se_respeta(data_dir):
+    base = P.get_sheets_local_photos_dir("Esc")
+    url = "https://cdn/x/juan.jpg"
+    assert P.resolve_local_photo_path(base, url) == url
+
+
+def test_apply_local_photos_muta_columnas_de_imagen(data_dir):
+    from credencializacion.utils.images import apply_local_photos, detect_image_attributes
+
+    base = P.get_sheets_local_photos_dir("Escuela Z")
+    records = [
+        {"matricula": "A1", "nombre": "Juan", "foto": "juan.jpeg"},
+        {"matricula": "A2", "nombre": "Ana", "foto": ""},  # sin foto
+        {"matricula": "A3", "nombre": "URL", "foto": "https://x/pep.jpg"},
+    ]
+    cols = detect_image_attributes(records)
+    assert cols == ["foto"]
+    apply_local_photos(records, cols, base)
+    assert records[0]["foto"] == str(base / "juan.jpeg")   # nombre → ruta local
+    assert records[1]["foto"] == ""                          # vacío se queda vacío
+    assert records[2]["foto"] == "https://x/pep.jpg"         # URL intacta
+    # El nombre suelto NO se resuelve (por eso hace falta unir la carpeta):
+    from credencializacion.renderer.pdf_engine import PDFEngine
+    import types
+    ns = types.SimpleNamespace()
+    assert PDFEngine._resolve_image_path(ns, "juan.jpeg") is None
+    # La ruta local (si el archivo existiera) sí la tomaría; creamos el archivo:
+    (base / "juan.jpeg").write_bytes(b"IMG")
+    assert PDFEngine._resolve_image_path(ns, str(base / "juan.jpeg")) == str(base / "juan.jpeg")
+
+
 def test_resolver_vacio(data_dir):
     base = P.get_sheets_local_photos_dir("Esc")
     assert P.resolve_local_photo_path(base, "") == ""

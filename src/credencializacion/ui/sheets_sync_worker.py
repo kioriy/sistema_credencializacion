@@ -85,6 +85,7 @@ class SheetsSyncWorker(QThread):
         colas_afectadas: list[str] = []
         sin_atributos: list[str] = []
         errores_pestanas: list[str] = []
+        encabezados_duplicados: list[str] = []
 
         for worksheet in worksheets:
             nombre_cliente = worksheet.title
@@ -96,7 +97,21 @@ class SheetsSyncWorker(QThread):
                 errores_pestanas.append(f"{nombre_cliente} ({e})")
                 continue
 
-            known_attrs = [h.strip() for h in header_row if h and h.strip()]
+            # Encabezados duplicados: gana la primera aparición. No se aborta la
+            # pestaña (gspread.get_all_records sí lo haría); se informa aparte.
+            raw_headers = [h.strip() for h in header_row if h and h.strip()]
+            known_attrs: list[str] = []
+            duplicados: list[str] = []
+            for h in raw_headers:
+                if h in known_attrs:
+                    if h not in duplicados:
+                        duplicados.append(h)
+                else:
+                    known_attrs.append(h)
+            if duplicados:
+                encabezados_duplicados.append(
+                    f"{nombre_cliente}: {', '.join(duplicados)}"
+                )
 
             # Encabezado leído con éxito: siempre se puede identificar y
             # registrar al cliente, aunque falle la descarga de sus filas.
@@ -104,11 +119,15 @@ class SheetsSyncWorker(QThread):
             rows_error: str | None = None
             if known_attrs:
                 try:
-                    rows = worksheet.get_all_records(default_blank="")
+                    from credencializacion.adapters.sheets import (
+                        read_worksheet_records,
+                    )
+                    # Lectura tolerante a encabezados duplicados/vacíos.
+                    rows = read_worksheet_records(worksheet)
                 except Exception as e:  # noqa: BLE001
-                    # Encabezados duplicados/ambiguos u otro problema puntual
-                    # de esta pestaña: se reporta pero NO se oculta al
-                    # cliente — solo se deja su padrón sin tocar este ciclo.
+                    # Otro problema puntual de esta pestaña: se reporta pero NO
+                    # se oculta al cliente — solo se deja su padrón sin tocar
+                    # este ciclo.
                     rows_error = str(e)
                     errores_pestanas.append(f"{nombre_cliente} ({e})")
 
@@ -158,29 +177,35 @@ class SheetsSyncWorker(QThread):
                     datos["enrollment_code"] = key
                     raw_records.append(datos)
 
-                # Columna de foto: se detecta por nombre (foto/photo/imagen…) o
-                # por valor. Su contenido es el NOMBRE del archivo local; se une
-                # a la carpeta de fotos de la escuela para formar la ruta de
-                # `photo_path` (ver get_sheets_local_photos_dir).
-                from credencializacion.utils.images import detect_image_attributes
-                from credencializacion.utils.paths import (
-                    get_sheets_local_photos_dir,
-                    resolve_local_photo_path,
+                # Columnas de foto: se detectan por nombre (foto/photo/imagen…)
+                # o por valor. Su contenido es el NOMBRE del archivo local; se
+                # convierte in situ a la ruta local `sheets_local_fotos/<cliente>/
+                # <archivo>` para que el diseñador y el render —que enlazan la
+                # foto por atributo— la resuelvan igual que una URL.
+                from credencializacion.utils.images import (
+                    apply_local_photos,
+                    detect_image_attributes,
                 )
+                from credencializacion.utils.paths import get_sheets_local_photos_dir
 
                 image_cols = detect_image_attributes(raw_records)
-                image_col = image_cols[0] if image_cols else None
                 fotos_dir = (
-                    get_sheets_local_photos_dir(nombre_cliente) if image_col else None
+                    get_sheets_local_photos_dir(nombre_cliente) if image_cols else None
                 )
+                apply_local_photos(raw_records, image_cols, fotos_dir)
+
+                # Publicar las columnas de imagen para que el editor de plantillas
+                # ofrezca enlazar el elemento de foto a ellas (igual que el flujo
+                # de la API). Sin esto el combo «Atributo imagen» sale vacío.
+                cfg["image_attributes"] = image_cols
+                cliente_obj.config = dict(cfg)
 
                 for rec_data in raw_records:
                     key = rec_data["enrollment_code"]
-                    photo_path = ""
-                    if image_col and fotos_dir is not None:
-                        photo_path = resolve_local_photo_path(
-                            fotos_dir, str(rec_data.get(image_col, "") or "")
-                        )
+                    # La foto principal (1ª columna de imagen) alimenta también
+                    # `photo_path`, que usan la miniatura del panel y el fallback
+                    # del render sin atributo.
+                    photo_path = str(rec_data.get(image_cols[0], "")) if image_cols else ""
                     existing_reg = session.query(Registro).filter_by(
                         cliente_id=cliente_id, enrollment_code=key,
                     ).first()
@@ -213,5 +238,6 @@ class SheetsSyncWorker(QThread):
             "colas_afectadas": colas_afectadas,
             "sin_atributos": sin_atributos,
             "errores_pestanas": errores_pestanas,
+            "encabezados_duplicados": encabezados_duplicados,
         }
         self.finished_ok.emit(len(worksheets), total_registros, reporte)
