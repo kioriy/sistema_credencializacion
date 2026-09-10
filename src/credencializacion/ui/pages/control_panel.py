@@ -1589,33 +1589,40 @@ class ControlPanel(QWidget):
     # ── Prefetch de fotos en segundo plano ──────────────────────────
 
     def _on_refresh_photos(self) -> None:
-        """Limpia el caché de fotos del cliente actual y las re-descarga.
+        """Actualiza las fotos del cliente cargado (servidor y/o Google Sheets).
 
-        Borra los archivos en disco (caché por URL) y la caché en memoria de las
-        fotos de los registros cargados, luego relanza el prefetch. Úsalo si una
-        foto quedó desactualizada, corrupta o no cargó.
+        - Fotos del servidor (URL http): se borran del caché en disco y se
+          vuelven a descargar (prefetch).
+        - Fotos LOCALES de Google Sheets (rutas en ``sheets_local_fotos``): no
+          hay nada que descargar; se relee la carpeta (por si agregaste o
+          reemplazaste archivos) limpiando el índice y la caché en memoria.
+
+        Úsalo si una foto quedó desactualizada, la reemplazaste o no cargó.
         """
         from PySide6.QtWidgets import QMessageBox
 
         records = getattr(self, "_all_records", []) or []
-        urls = {
-            r.photo_path
-            for r in records
-            if getattr(r, "photo_path", "") and str(r.photo_path).startswith("http")
-        }
-        if not urls:
+        con_foto = [r for r in records if getattr(r, "photo_path", "")]
+        urls = {r.photo_path for r in con_foto if str(r.photo_path).startswith("http")}
+        locales = [r for r in con_foto if not str(r.photo_path).startswith("http")]
+
+        if not con_foto:
             self.set_status(
                 "⚠️ No hay fotos que actualizar (selecciona una escuela primero).",
                 "warning",
             )
             return
 
+        partes = []
+        if urls:
+            partes.append(f"{len(urls)} del servidor (se re-descargan)")
+        if locales:
+            partes.append(f"{len(locales)} locales de Google Sheets (se releen)")
         resp = QMessageBox.question(
             self,
             "Actualizar fotos",
-            f"Se borrarán del caché {len(urls)} foto(s) y se volverán a "
-            "descargar del servidor.\n\nÚsalo si alguna foto se ve "
-            "desactualizada o no carga. ¿Continuar?",
+            "Se actualizarán las fotos: " + " y ".join(partes) + ".\n\n"
+            "Úsalo si cambiaste una foto o alguna no carga. ¿Continuar?",
         )
         if resp != QMessageBox.StandardButton.Yes:
             return
@@ -1626,20 +1633,33 @@ class ControlPanel(QWidget):
         if prev is not None:
             prev.stop()
 
-        from credencializacion.adapters.image_cache import clear_url_cache
-
-        borradas = clear_url_cache(urls)
+        # Limpiar cachés en memoria y el índice de carpetas locales, para que las
+        # fotos locales agregadas/reemplazadas se vuelvan a leer del disco.
         try:
             self._raw_photo_cache.clear()
         except Exception:  # noqa: BLE001
             pass
+        try:
+            from credencializacion.utils import images as _images
+            _images._folder_index_cache.clear()
+        except Exception:  # noqa: BLE001
+            pass
 
-        self.set_status(
-            f"🧹 {borradas} foto(s) limpiadas del caché. Re-descargando...",
-            "info", toast=False,
-        )
-        # Relanzar el prefetch (reemplaza el worker anterior) y refrescar la
-        # página: las fotos aparecerán conforme se re-descarguen.
+        borradas = 0
+        if urls:
+            from credencializacion.adapters.image_cache import clear_url_cache
+            borradas = clear_url_cache(urls)
+
+        if urls and locales:
+            msg = f"🧹 {borradas} del servidor y {len(locales)} locales actualizadas. Recargando..."
+        elif urls:
+            msg = f"🧹 {borradas} foto(s) del servidor limpiadas del caché. Re-descargando..."
+        else:
+            msg = f"🔄 {len(locales)} foto(s) locales releídas del disco. Recargando..."
+        self.set_status(msg, "info", toast=False)
+
+        # Relanzar el prefetch (solo afecta a las URLs http) y refrescar la
+        # página: las fotos aparecerán conforme se re-descarguen o se relean.
         self._start_photo_prefetch(records)
         self._refresh_page()
 

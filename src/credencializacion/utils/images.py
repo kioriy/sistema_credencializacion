@@ -75,6 +75,58 @@ def detect_image_attributes(records: list[dict]) -> list[str]:
     return result
 
 
+_folder_index_cache: dict = {}
+
+
+def _folder_stem_index(folder) -> dict[str, str]:
+    """Índice ``nombre_base(minúsculas) → ruta`` de las imágenes de una carpeta.
+
+    Se cachea por carpeta y se invalida si cambia su ``mtime`` (p. ej. al agregar
+    fotos), para no listar el directorio en cada resolución durante un render.
+    """
+    from pathlib import Path
+
+    folder = Path(folder)
+    try:
+        mtime = folder.stat().st_mtime
+    except OSError:
+        return {}
+    clave = str(folder)
+    cache = _folder_index_cache.get(clave)
+    if cache and cache[0] == mtime:
+        return cache[1]
+    indice: dict[str, str] = {}
+    try:
+        for f in folder.iterdir():
+            if f.is_file() and f.suffix.lower() in _IMAGE_EXTS:
+                indice.setdefault(f.stem.casefold(), str(f))
+    except OSError:
+        return {}
+    _folder_index_cache[clave] = (mtime, indice)
+    return indice
+
+
+def resolve_existing_image(path_str: str) -> str | None:
+    """Ruta real de una imagen local, tolerando la extensión y las mayúsculas.
+
+    Si ``path_str`` existe tal cual, se devuelve. Si no, se busca en su carpeta
+    un archivo con el MISMO nombre base y una extensión de imagen (p. ej. la
+    celda del Sheet dice ``juan.jpg`` pero el archivo es ``juan.jpeg``, o cambia
+    el uso de mayúsculas). Devuelve ``None`` si no se encuentra.
+    """
+    if not path_str:
+        return None
+    from pathlib import Path
+
+    p = Path(path_str)
+    try:
+        if p.exists():
+            return str(p)
+    except OSError:
+        return None
+    return _folder_stem_index(p.parent).get(p.stem.casefold())
+
+
 def apply_local_photos(records: list[dict], image_cols: list[str], fotos_dir) -> None:
     """Convierte in situ las columnas de imagen en rutas locales absolutas.
 

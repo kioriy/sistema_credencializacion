@@ -212,11 +212,15 @@ def _create_circular_pixmap(path: str, size: int = PHOTO_SIZE) -> QPixmap:
 
     Si la imagen no existe, devuelve un placeholder gris.
     """
-    from pathlib import Path as PathLib
+    from credencializacion.utils.images import resolve_existing_image
 
+    # Tolera extensión/mayúsculas distintas (Sheets: la celda dice `.jpg` y el
+    # archivo es `.jpeg`). Para URLs http, resolve_existing_image devuelve None
+    # y el flujo de descarga las aplica por otro lado.
+    real = resolve_existing_image(path) if path else None
     source = QPixmap()
-    if path and PathLib(path).exists():
-        source.load(path)
+    if real:
+        source.load(real)
     else:
         source = QPixmap(size, size)
         source.fill(QColor(BORDER))

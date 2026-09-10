@@ -89,6 +89,29 @@ def test_resolver_vacio(data_dir):
     assert P.resolve_local_photo_path(base, "   ") == ""
 
 
+def test_resolve_existing_image_tolera_extension_y_mayusculas(tmp_path):
+    from credencializacion.utils.images import resolve_existing_image
+
+    (tmp_path / "juan.jpeg").write_bytes(b"IMG")   # archivo real .jpeg
+    (tmp_path / "Ana.PNG").write_bytes(b"IMG")
+
+    # La celda dice .jpg pero el archivo es .jpeg (extensión distinta):
+    assert resolve_existing_image(str(tmp_path / "juan.jpg")) == str(tmp_path / "juan.jpeg")
+    # Extensión exacta también:
+    assert resolve_existing_image(str(tmp_path / "juan.jpeg")) == str(tmp_path / "juan.jpeg")
+    # Mayúsculas distintas: la ruta devuelta debe apuntar a un archivo real.
+    # (En sistemas case-insensitive puede devolver la ruta de entrada; se valida
+    # por contenido, no por igualdad exacta de cadena.)
+    from pathlib import Path
+    r = resolve_existing_image(str(tmp_path / "ana.png"))
+    assert r is not None and Path(r).read_bytes() == b"IMG"
+    # No existe ninguno con ese nombre base:
+    assert resolve_existing_image(str(tmp_path / "pedro.jpg")) is None
+    # Vacío y URL → None (la URL se resuelve por descarga en otro lado):
+    assert resolve_existing_image("") is None
+    assert resolve_existing_image("https://x/a.jpg") is None
+
+
 def test_indice_de_rutas_incluye_fotos_locales(data_dir):
     rutas = P.app_base_paths()
     etiquetas = [label for label, _ in rutas]

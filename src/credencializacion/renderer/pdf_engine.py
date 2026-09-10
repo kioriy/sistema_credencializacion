@@ -656,7 +656,10 @@ class PDFEngine:
             return val_str
         if val_str.startswith(("http://", "https://")):
             return self._download_image(val_str)
-        return None
+        # Ruta local que no existe tal cual: tolerar extensión/mayúsculas
+        # distintas (p. ej. el Sheet dice `.jpg` y el archivo es `.jpeg`).
+        from credencializacion.utils.images import resolve_existing_image
+        return resolve_existing_image(val_str)
 
     def _download_image(self, url: str) -> str | None:
         """Resuelve una URL de imagen a un archivo local reutilizando la caché.
