@@ -28,6 +28,7 @@ def init_database() -> None:
     Base.metadata.create_all(engine)
     _drop_legacy_multiplantillaje(engine)
     _add_cola_pdf_columns(engine)
+    _add_item_cola_reposicion_columns(engine)
     _migrate_plantilla_base()
     _migrate_plantilla_base_por_cliente()
     _sembrar_diccionario()
@@ -156,6 +157,37 @@ def _add_cola_pdf_columns(engine) -> None:
         cur = raw.cursor()
         for col, tipo in faltantes:
             cur.execute(f"ALTER TABLE colas_impresion ADD COLUMN {col} {tipo}")
+        raw.commit()
+        cur.close()
+    finally:
+        raw.close()
+
+
+def _add_item_cola_reposicion_columns(engine) -> None:
+    """Agrega a `items_cola` las columnas de reposiciones si faltan.
+
+    Distinguen una tarjeta de alumno de la de un autorizado. Los ítems
+    existentes quedan como ``tipo_item='alumno'``, que es lo que eran. Es
+    idempotente.
+    """
+    inspector = inspect(engine)
+    if "items_cola" not in set(inspector.get_table_names()):
+        return
+    existentes = {c["name"] for c in inspector.get_columns("items_cola")}
+    columnas = (
+        ("tipo_item", "VARCHAR(20) NOT NULL DEFAULT 'alumno'"),
+        ("autorizado_slot", "INTEGER"),
+        ("authorized_person_id", "INTEGER"),
+        ("credential_request", "VARCHAR(20)"),
+    )
+    faltantes = [(col, tipo) for col, tipo in columnas if col not in existentes]
+    if not faltantes:
+        return
+    raw = engine.raw_connection()
+    try:
+        cur = raw.cursor()
+        for col, tipo in faltantes:
+            cur.execute(f"ALTER TABLE items_cola ADD COLUMN {col} {tipo}")
         raw.commit()
         cur.close()
     finally:

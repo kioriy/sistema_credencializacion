@@ -35,9 +35,17 @@ class QueueRenderWorker(QThread):
         plantilla_id: int,
         out_dir: str,
         perfil: dict | None = None,
+        autorizados: list[int | None] | None = None,
     ) -> None:
         super().__init__()
         self._record_ids = list(record_ids)
+        # Alineada a `record_ids`: el `authorized_person_id` cuando el ítem es
+        # la tarjeta de un autorizado (colas de reposiciones), None si es la
+        # del alumno. Con al menos un autorizado no se colapsan familias: la
+        # cola ya trae una tarjeta por código de autorizado.
+        self._autorizados = list(autorizados or [None] * len(self._record_ids))
+        if len(self._autorizados) < len(self._record_ids):
+            self._autorizados += [None] * (len(self._record_ids) - len(self._autorizados))
         self._plantilla_id = plantilla_id
         self._out_dir = out_dir
         # Perfil de posición (calibración por impresora). None = calibración
@@ -69,11 +77,26 @@ class QueueRenderWorker(QThread):
                     .filter(Registro.id.in_(self._record_ids))
                     .all()
                 }
-                render_items = [
-                    (regs_by_id[i], plantilla)
-                    for i in self._record_ids
-                    if i in regs_by_id
-                ]
+                from credencializacion.services import reposiciones
+
+                # Si la persona ya no ocupa la posición a la que está ligado
+                # el diseño, sus datos se copian sobre esa posición.
+                slot_diseno = reposiciones.slot_de_plantilla(
+                    list(plantilla.elementos_frente or [])
+                    + list(plantilla.elementos_vuelta or [])
+                )
+                render_items = []
+                remapeos: list[dict] = []
+                for i, person_id in zip(self._record_ids, self._autorizados):
+                    if i not in regs_by_id:
+                        continue
+                    reg = regs_by_id[i]
+                    render_items.append((reg, plantilla))
+                    remapeos.append(
+                        reposiciones.extras_remapeo(reg.datos or {}, slot_diseno, person_id)
+                        if person_id is not None else {}
+                    )
+                colapsar = not any(a is not None for a in self._autorizados)
                 if not render_items:
                     self.failed.emit("No hay registros para renderizar")
                     return
@@ -83,7 +106,8 @@ class QueueRenderWorker(QThread):
                 # caras: si cada cara filtrara por su cuenta, los frentes y
                 # las vueltas quedarían desalineados al voltear la hoja.
                 render_items, extras, reporte = self._aplicar_reglas(
-                    session, plantilla, render_items
+                    session, plantilla, render_items,
+                    remapeos=remapeos, colapsar=colapsar,
                 )
                 if not render_items:
                     self.failed.emit(
@@ -127,7 +151,7 @@ class QueueRenderWorker(QThread):
             self.failed.emit(str(e))
 
     @staticmethod
-    def _aplicar_reglas(session, plantilla, render_items):
+    def _aplicar_reglas(session, plantilla, render_items, remapeos=None, colapsar=True):
         """Aplica las reglas de impresión antes de renderizar.
 
         Orden de ejecución:
@@ -141,6 +165,11 @@ class QueueRenderWorker(QThread):
         3. Se descartan los registros que no cumplen los atributos marcados
            como requeridos, evaluando frente y vuelta en conjunto.
 
+        ``remapeos`` (alineada a ``render_items``) son atributos por ítem que
+        se suman a los extras —p. ej. los del autorizado que debe mostrar el
+        diseño—. ``colapsar=False`` omite el paso 1 (colas de reposiciones,
+        ya deduplicadas por código de autorizado).
+
         Returns:
             ``(items_finales, extras_alineados, reporte)``
         """
@@ -150,10 +179,12 @@ class QueueRenderWorker(QThread):
         reporte: dict[str, list] = {"sin_requeridos": [], "hermanos_colapsados": []}
 
         # 1. Colapsado por familia (solo si el diseño usa slots de hermanos).
-        if print_rules.template_uses_sibling_slots(plantilla):
+        remapeos = list(remapeos or [{} for _ in render_items])
+        if colapsar and print_rules.template_uses_sibling_slots(plantilla):
             indices, descartados = print_rules.collapse_families(render_items)
             if descartados:
                 render_items = [render_items[i] for i in indices]
+                remapeos = [remapeos[i] for i in indices]
                 reporte["hermanos_colapsados"] = [
                     reg.nombre_completo or reg.enrollment_code or f"#{reg.id}"
                     for reg, _ in descartados
@@ -181,8 +212,8 @@ class QueueRenderWorker(QThread):
         slot_order = print_rules.template_sibling_slot_order(plantilla)
 
         extras = [
-            print_rules.sibling_extras(reg, grupos, slot_order)
-            for reg, _ in render_items
+            {**print_rules.sibling_extras(reg, grupos, slot_order), **remapeo}
+            for (reg, _), remapeo in zip(render_items, remapeos)
         ]
 
         # 3. Atributos requeridos, evaluando ambas caras en conjunto.

@@ -6,6 +6,7 @@ Rediseño basado en tarjetas (cards) e íconos vectoriales (qtawesome / Font Awe
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt, Signal, QSize
@@ -43,6 +44,34 @@ WARNING = "#EF4444" # Rojo para "FALTA FOTO"
 WARNING_BG = "#FEF2F2"
 MAIN_BG = "#F5F7FA"
 
+@dataclass
+class QueueMeta:
+    """Qué tarjeta del registro se imprime y con qué diseño.
+
+    Las entradas normales (agregadas desde la tabla) no llevan metadatos: son
+    la credencial del alumno con la plantilla elegida en el combo. Las de
+    reposiciones traen su propia plantilla y, si son de un autorizado, su
+    posición e id de persona.
+    """
+
+    tipo: str = "alumno"  # "alumno" | "autorizado"
+    slot: int | None = None
+    authorized_person_id: int | None = None
+    solicitud: str | None = None  # "replacement" | "new"
+    plantilla_id: int | None = None
+    plantilla_nombre: str = ""
+    etiqueta: str = ""
+    nombre: str = ""
+    foto: str = ""
+
+
+def queue_key(registro: "Registro", meta: QueueMeta | None) -> str:
+    """Identidad de una entrada: un alumno puede tener varias tarjetas."""
+    if meta is None or meta.tipo != "autorizado":
+        return f"{registro.id}:alumno"
+    return f"{registro.id}:autorizado:{meta.authorized_person_id}"
+
+
 def _qta_pixmap(icon_name: str, size: int = 16, color: str = "#64748B") -> "QPixmap":
     """Genera un QPixmap desde qtawesome."""
     return qta.icon(icon_name, color=color).pixmap(QSize(size, size))
@@ -54,13 +83,25 @@ class PrintQueueCard(QFrame):
     Diseño basado en el mockup con bordes, foto, estado y botón 'x'.
     """
 
-    remove_requested = Signal(int)
+    remove_requested = Signal(str)
 
-    def __init__(self, registro: "Registro", pixmap: QPixmap | None = None, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        registro: "Registro",
+        pixmap: QPixmap | None = None,
+        parent: QWidget | None = None,
+        meta: QueueMeta | None = None,
+    ) -> None:
         super().__init__(parent)
         self._registro = registro
         self._registro_id = registro.id
-        self._has_photo = bool(registro.photo_path)
+        self._meta = meta
+        self._key = queue_key(registro, meta)
+        self._photo_path = (
+            meta.foto if meta is not None and meta.tipo == "autorizado"
+            else registro.photo_path
+        )
+        self._has_photo = bool(self._photo_path)
         self._pixmap = pixmap
         
         self.setObjectName("QueueCard")
@@ -88,22 +129,23 @@ class PrintQueueCard(QFrame):
         photo_container = QFrame()
         photo_container.setFixedSize(50, 65)
         
+        # Foto cacheada o, si no, intento con la ruta local. Una URL que aún no
+        # se descarga da un pixmap nulo: se muestra el ícono de imagen en vez
+        # de un recuadro oscuro vacío (el PDF sí descarga la foto).
+        pix = None
         if self._has_photo:
+            pix = self._pixmap if self._pixmap else QPixmap(self._photo_path)
+            if pix.isNull():
+                pix = None
+
+        if pix is not None:
             photo_container.setStyleSheet(f"background-color: {TEXT_DARK};")
             photo_layout = QVBoxLayout(photo_container)
             photo_layout.setContentsMargins(0, 0, 0, 0)
             photo_lbl = QLabel(photo_container)
-            
-            if self._pixmap:
-                photo_lbl.setPixmap(self._pixmap.scaled(
-                    50, 65, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation
-                ))
-            else:
-                # Intento de cargar ruta local
-                photo_lbl.setPixmap(QPixmap(self._registro.photo_path).scaled(
-                    50, 65, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation
-                ))
-                
+            photo_lbl.setPixmap(pix.scaled(
+                50, 65, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation
+            ))
             photo_lbl.setFixedSize(50, 65)
             photo_layout.addWidget(photo_lbl)
         else:
@@ -124,13 +166,30 @@ class PrintQueueCard(QFrame):
         info_layout.setSpacing(2)
         info_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
 
-        # Nombre
-        name_lbl = QLabel(self._registro.datos.get("nombre", f"Registro #{self._registro_id}"))
+        meta = self._meta
+        # Nombre (en tarjetas de autorizado, el de la persona)
+        nombre = (meta.nombre if meta and meta.nombre else None) or self._registro.datos.get(
+            "nombre", f"Registro #{self._registro_id}"
+        )
+        name_lbl = QLabel(nombre)
         name_lbl.setStyleSheet(f"color: {TEXT_DARK}; font-weight: bold; font-size: 11px; border: none; background: transparent;")
         info_layout.addWidget(name_lbl)
 
+        # Tipo de tarjeta (reposiciones): "Autorizado 2 · Nueva — de <alumno>"
+        if meta and meta.etiqueta:
+            texto = meta.etiqueta
+            if meta.tipo == "autorizado":
+                texto += f" — {self._registro.nombre_completo}"
+            tipo_lbl = QLabel(texto)
+            tipo_lbl.setWordWrap(True)
+            tipo_lbl.setStyleSheet(f"color: {PRIMARY}; font-size: 10px; font-weight: bold; border: none; background: transparent;")
+            info_layout.addWidget(tipo_lbl)
+
         # Plantilla
-        template_lbl = QLabel("Plantilla: Standard_v2")
+        template_lbl = QLabel(
+            f"Plantilla: {meta.plantilla_nombre}" if meta and meta.plantilla_nombre
+            else "Plantilla: Standard_v2"
+        )
         template_lbl.setStyleSheet(f"color: {TEXT_LIGHT}; font-size: 11px; font-family: monospace; border: none; background: transparent;")
         info_layout.addWidget(template_lbl)
 
@@ -191,8 +250,8 @@ class PrintQueueCard(QFrame):
         layout.addLayout(close_layout)
 
     def _on_remove_clicked(self) -> None:
-        """Emite la señal para eliminar este registro de la cola."""
-        self.remove_requested.emit(self._registro_id)
+        """Emite la señal para eliminar esta tarjeta de la cola."""
+        self.remove_requested.emit(self._key)
 
 
 class PrintQueuePanel(QWidget):
@@ -274,17 +333,30 @@ class PrintQueuePanel(QWidget):
 
         self._update_ui_state()
 
-    def add_to_queue(self, registro: "Registro", pixmap: QPixmap | None = None) -> None:
-        """Agrega un registro a la cola con su foto cacheada opcional."""
-        if any(item[0].id == registro.id for item in self._queue):
+    def add_to_queue(
+        self,
+        registro: "Registro",
+        pixmap: QPixmap | None = None,
+        meta: QueueMeta | None = None,
+        render: bool = True,
+    ) -> None:
+        """Agrega una tarjeta a la cola con su foto cacheada opcional.
+
+        ``render=False`` permite agregar muchas y redibujar una sola vez.
+        """
+        key = queue_key(registro, meta)
+        if any(queue_key(item[0], item[2]) == key for item in self._queue):
             return
 
-        self._queue.append((registro, pixmap))
-        self._render_queue()
+        self._queue.append((registro, pixmap, meta))
+        if render:
+            self._render_queue()
 
-    def remove_from_queue(self, registro_id: int) -> None:
-        """Elimina un registro de la cola."""
-        self._queue = [item for item in self._queue if item[0].id != registro_id]
+    def remove_from_queue(self, key: str) -> None:
+        """Elimina una tarjeta de la cola (por su clave)."""
+        self._queue = [
+            item for item in self._queue if queue_key(item[0], item[2]) != key
+        ]
         self._render_queue()
 
     def clear_queue(self) -> None:
@@ -296,6 +368,14 @@ class PrintQueuePanel(QWidget):
         """Devuelve la lista actual de registros en cola."""
         return [item[0] for item in self._queue]
 
+    def get_entries(self) -> list[tuple["Registro", QueueMeta | None]]:
+        """Devuelve las tarjetas en cola con sus metadatos (o None)."""
+        return [(item[0], item[2]) for item in self._queue]
+
+    def refresh(self) -> None:
+        """Redibuja la cola (tras agregar varias con ``render=False``)."""
+        self._render_queue()
+
     def _render_queue(self) -> None:
         """Vuelve a dibujar todas las tarjetas basado en la lista actual."""
         while self._cards_layout.count():
@@ -303,8 +383,8 @@ class PrintQueuePanel(QWidget):
             if child.widget():
                 child.widget().deleteLater()
 
-        for reg, pixmap in self._queue:
-            card = PrintQueueCard(reg, pixmap)
+        for reg, pixmap, meta in self._queue:
+            card = PrintQueueCard(reg, pixmap, meta=meta)
             card.remove_requested.connect(self.remove_from_queue)
             self._cards_layout.addWidget(card)
 

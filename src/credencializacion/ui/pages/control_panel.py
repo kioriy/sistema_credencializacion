@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QProgressDialog,
     QTableWidgetItem,
     QCompleter,
+    QDialog,
 )
 
 from credencializacion.ui.widgets.record_table import RecordTable
@@ -55,9 +56,22 @@ _API_KEY = "7c9e6679-7425-40de-944b-e07fc1f90ae7"
 
 
 class SyncWorker(QThread):
+    """Sincroniza escuelas y alumnos desde la API de MiEscuela.
+
+    Args:
+        school_api_id: si se indica, sincroniza SOLO esa escuela (sus datos y
+            su padrón); si es ``None``, todas las escuelas de la clave. La
+            sincronización completa crece con la base, así que la individual
+            es la de uso diario.
+    """
+
     progress = Signal(str, str, bool)
     finished_ok = Signal(int, int, dict)  # escuelas, alumnos, reporte de depuración
     failed = Signal(str)
+
+    def __init__(self, school_api_id: int | None = None) -> None:
+        super().__init__()
+        self._school_api_id = school_api_id
 
     def run(self) -> None:
         from credencializacion.adapters.miescuela import MiEscuelaAdapter
@@ -68,7 +82,12 @@ class SyncWorker(QThread):
         BASE_URL = "https://app.miescuela.net"
         API_KEY = "7c9e6679-7425-40de-944b-e07fc1f90ae7"
 
-        self.progress.emit("⏳ Sincronizando escuelas con MiEscuela.net...", "info", False)
+        solo = self._school_api_id
+        self.progress.emit(
+            "⏳ Sincronizando la escuela seleccionada con MiEscuela.net..."
+            if solo is not None else "⏳ Sincronizando escuelas con MiEscuela.net...",
+            "info", False,
+        )
 
         # Reporte de depuración acumulado durante la corrida.
         total_depurados = 0
@@ -87,11 +106,12 @@ class SyncWorker(QThread):
             except ConnectionError:
                 self.progress.emit("⚠ Endpoint /schools no disponible, usando fallback...", "warning", False)
                 schools_confiables = False
-                records = adapter.fetch_records(school_id=1, status="all")
+                fallback_id = solo if solo is not None else 1
+                records = adapter.fetch_records(school_id=fallback_id, status="all")
                 if records:
-                    school_name = records[0].get("escuela", "Escuela 1")
+                    school_name = records[0].get("escuela", f"Escuela {fallback_id}")
                     schools = [{
-                        "id": 1,
+                        "id": fallback_id,
                         "name": school_name,
                         "cct": "",
                         "school_level": records[0].get("nivel_escolar", ""),
@@ -102,6 +122,15 @@ class SyncWorker(QThread):
                     }]
                 else:
                     schools = []
+
+            if solo is not None:
+                schools = [s for s in schools if s.get("id") == solo]
+                if not schools:
+                    self.failed.emit(
+                        "La escuela seleccionada ya no está en la plataforma "
+                        "(se conserva localmente)."
+                    )
+                    return
 
             if not schools:
                 self.progress.emit("⚠ No se encontraron escuelas asociadas a esta clave API.", "warning", True)
@@ -157,7 +186,11 @@ class SyncWorker(QThread):
                 )
                 try:
                     raw_records = adapter.fetch_records(school_id=api_id, status="all")
-                except Exception:
+                except Exception as exc:
+                    if solo is not None:
+                        # Individual: saltarla diría "completada" sin datos.
+                        self.failed.emit(f"No se pudieron descargar los alumnos: {exc}")
+                        return
                     continue
 
                 if not raw_records:
@@ -232,7 +265,9 @@ class SyncWorker(QThread):
             # ── 4. Reportar escuelas que ya no existen en la plataforma ──
             # No se eliminan localmente (arrastrarían en cascada sus
             # plantillas y colas); solo se avisa para depuración manual.
-            if schools_confiables:
+            # (Solo en la sincronización completa: la individual no ve el
+            # resto de las escuelas y daría falsos faltantes.)
+            if schools_confiables and solo is None:
                 api_school_ids = {s.get("id") for s in schools}
                 with DatabaseSession() as session:
                     faltantes = (
@@ -302,7 +337,16 @@ class ControlPanel(QWidget):
         self._connect_signals()
         self._render_worker = None
         self._render_on_done = None
+        # Encadenado de renders cuando la cola tiene varias plantillas.
+        self._render_jobs: list[dict] = []
+        self._render_jobs_results: list[tuple[str, str]] = []
+        self._render_jobs_done = None
         self._mark_workers = []
+        # Reposiciones: consulta en segundo plano de la escuela actual.
+        self.btn_reposiciones = None  # lo asigna la ventana principal
+        self._repos_worker = None
+        self._repos_requery = False
+        self._repos_load_on_done = False
         
         # Cargar datos locales al iniciar
         self._load_clients_combo()
@@ -744,6 +788,8 @@ class ControlPanel(QWidget):
         self._chk_select_all.toggled.connect(self._table.select_all)
         self._search_input.textChanged.connect(self._on_search_changed)
         self._combo_clients.currentIndexChanged.connect(self._on_client_selected)
+        # Después de cargar la escuela: conteo de reposiciones en el botón.
+        self._combo_clients.currentIndexChanged.connect(self._on_client_changed_reposiciones)
         self._table.add_to_queue_clicked.connect(self._add_single_to_queue)
         self._table.itemSelectionChanged.connect(self._on_selection_changed)
 
@@ -870,16 +916,12 @@ class ControlPanel(QWidget):
 
         El render (frentes y vueltas, 2 diseños por hoja) se ejecuta en un hilo
         en segundo plano; el progreso se refleja en el footer y, al terminar, se
-        abre el diálogo de vista previa.
+        abre el diálogo de vista previa. Si la cola mezcla plantillas (p. ej.
+        reposiciones de alumno y de autorizados), se renderiza un grupo por
+        plantilla y los PDFs se unen para verlos juntos.
         """
-        queue_records = self._queue_panel.get_queue()
-        if not queue_records:
-            self.set_status("⚠️ La cola de impresión está vacía", "warning")
-            return
-
-        plantilla_id = self._combo_templates.currentData()
-        if not plantilla_id:
-            self.set_status("⚠️ Selecciona una plantilla primero", "warning")
+        grupos = self._queue_groups()
+        if grupos is None:
             return
 
         if getattr(self, "_render_worker", None) is not None:
@@ -887,12 +929,57 @@ class ControlPanel(QWidget):
             return
 
         import tempfile
+        from pathlib import Path
 
-        ids = [r.id for r in queue_records]
-        out_dir = tempfile.mkdtemp(prefix="credencial_preview_")
-
+        base_dir = Path(tempfile.mkdtemp(prefix="credencial_preview_"))
         self.set_status("🖼 Generando vista previa...", "info", toast=False)
-        self._start_render(ids, plantilla_id, out_dir, self._on_preview_ready)
+
+        if len(grupos) == 1:
+            g = grupos[0]
+            self._start_render(
+                g["ids"], g["plantilla_id"], str(base_dir), self._on_preview_ready,
+                autorizados=g["autorizados"],
+            )
+            return
+
+        jobs = [
+            {
+                "ids": g["ids"],
+                "plantilla_id": g["plantilla_id"],
+                "out_dir": str(base_dir / f"grupo_{i}"),
+                "autorizados": g["autorizados"],
+            }
+            for i, g in enumerate(grupos, start=1)
+        ]
+
+        def _unir(resultados: list[tuple[str, str]]) -> None:
+            if not resultados:
+                return
+            frentes = self._merge_pdfs([f for f, _ in resultados], base_dir / "frentes.pdf")
+            vueltas = self._merge_pdfs([v for _, v in resultados], base_dir / "vueltas.pdf")
+            self._on_preview_ready(str(frentes), str(vueltas))
+
+        self._run_render_jobs(jobs, _unir)
+
+    @staticmethod
+    def _merge_pdfs(rutas: list[str], destino) -> "Path":
+        """Concatena PDFs (en orden) en ``destino``.
+
+        Cada grupo ya trae sus páginas completas (2 diseños por hoja), así que
+        concatenar frentes y vueltas por separado conserva la correspondencia
+        página a página al voltear la hoja.
+        """
+        from pathlib import Path
+        import fitz  # PyMuPDF
+
+        salida = fitz.open()
+        for ruta in rutas:
+            if ruta and Path(ruta).exists():
+                with fitz.open(ruta) as doc:
+                    salida.insert_pdf(doc)
+        salida.save(str(destino))
+        salida.close()
+        return Path(destino)
 
     def _on_preview_ready(self, frentes_pdf: str, vueltas_pdf: str) -> None:
         """Abre el diálogo de vista previa con los PDFs ya generados."""
@@ -909,14 +996,17 @@ class ControlPanel(QWidget):
 
     # ── Render en segundo plano (compartido) ───────────────────────
 
-    def _start_render(self, ids, plantilla_id, out_dir, on_done) -> None:
+    def _start_render(self, ids, plantilla_id, out_dir, on_done, autorizados=None) -> None:
         """Lanza un ``QueueRenderWorker`` y enruta sus señales.
 
         ``on_done`` se invoca en el hilo principal con (frentes_pdf, vueltas_pdf)
-        cuando el render termina correctamente.
+        cuando el render termina correctamente. ``autorizados`` (alineada a
+        ``ids``) marca los ítems que son la tarjeta de un autorizado.
         """
         self._render_on_done = on_done
-        self._render_worker = QueueRenderWorker(ids, plantilla_id, out_dir)
+        self._render_worker = QueueRenderWorker(
+            ids, plantilla_id, out_dir, autorizados=autorizados
+        )
         self._render_worker.progress.connect(
             lambda m: self.set_status(m, "info", toast=False)
         )
@@ -925,6 +1015,43 @@ class ControlPanel(QWidget):
         self._render_worker.omitidos.connect(self._on_render_omitidos)
         self._render_worker.finished.connect(self._cleanup_render_worker)
         self._render_worker.start()
+
+    def _run_render_jobs(self, jobs, on_all_done) -> None:
+        """Renderiza varios grupos uno tras otro (un worker a la vez).
+
+        ``jobs`` es una lista de dicts ``{ids, plantilla_id, out_dir,
+        autorizados, on_ok?}``; ``on_ok(frentes, vueltas)`` se llama al
+        terminar bien ese grupo. Al terminar todos se llama ``on_all_done`` con la lista de
+        ``(frentes_pdf, vueltas_pdf)`` de los que salieron bien, en orden. El
+        siguiente grupo arranca al terminar el hilo anterior
+        (``_cleanup_render_worker``), no en su señal de éxito: si arrancara
+        antes, la limpieza del hilo viejo borraría la referencia al nuevo.
+        """
+        self._render_jobs = list(jobs)
+        self._render_jobs_results = []
+        self._render_jobs_done = on_all_done
+        self._next_render_job()
+
+    def _next_render_job(self) -> None:
+        if not self._render_jobs:
+            done = self._render_jobs_done
+            resultados = self._render_jobs_results
+            self._render_jobs_done = None
+            self._render_jobs_results = []
+            if done is not None:
+                done(resultados)
+            return
+        job = self._render_jobs.pop(0)
+
+        def _ok(frentes: str, vueltas: str) -> None:
+            self._render_jobs_results.append((frentes, vueltas))
+            if job.get("on_ok") is not None:
+                job["on_ok"](frentes, vueltas)
+
+        self._start_render(
+            job["ids"], job["plantilla_id"], job["out_dir"], _ok,
+            autorizados=job.get("autorizados"),
+        )
 
     @Slot(dict)
     def _on_render_omitidos(self, reporte: dict) -> None:
@@ -967,6 +1094,9 @@ class ControlPanel(QWidget):
     def _cleanup_render_worker(self) -> None:
         self._render_worker = None
         self._render_on_done = None
+        # Encadenado de grupos (colas con varias plantillas).
+        if getattr(self, "_render_jobs_done", None) is not None:
+            self._next_render_job()
 
     def _on_print_front(self) -> None:
         """Envía la cola en memoria al Centro de Impresión (genera y guarda PDFs)."""
@@ -1109,33 +1239,76 @@ class ControlPanel(QWidget):
         )
         return False
 
-    def _send_queue_to_print_center(self) -> None:
-        """Crea la cola en BD y genera/guarda sus PDFs sin bloquear la app.
+    def _queue_groups(self) -> list[dict] | None:
+        """Agrupa la cola visual por plantilla.
 
-        Crea la ``ColaImpresion`` y sus ítems, luego renderiza en segundo plano
-        los PDFs de frentes y vueltas (2 diseños por hoja) en una carpeta estable
-        (build-safe) y guarda sus rutas en la cola. Al terminar, limpia la cola
-        visual y refresca el Centro de Impresión.
+        Las tarjetas de reposiciones traen su propia plantilla; las agregadas
+        desde la tabla usan la del combo. Cada grupo es una cola (y un par de
+        PDFs) en el Centro de Impresión.
+
+        Returns:
+            Lista de grupos ``{plantilla_id, nombre, reposicion, entries, ids,
+            autorizados}`` en orden de aparición, o ``None`` (con aviso en el
+            footer) si la cola está vacía o falta elegir plantilla.
         """
-        queue_records = self._queue_panel.get_queue()
-        if not queue_records:
+        entries = self._queue_panel.get_entries()
+        if not entries:
             self.set_status("⚠️ La cola de impresión está vacía", "warning")
+            return None
+
+        combo_id = self._combo_templates.currentData()
+        combo_nombre = self._combo_templates.currentText()
+        grupos: dict[int, dict] = {}
+        for reg, meta in entries:
+            propia = meta is not None and meta.plantilla_id is not None
+            pid = meta.plantilla_id if propia else combo_id
+            if not pid:
+                self.set_status("⚠️ Selecciona una plantilla primero", "warning")
+                return None
+            g = grupos.setdefault(pid, {
+                "plantilla_id": pid,
+                "nombre": meta.plantilla_nombre if propia else combo_nombre,
+                "reposicion": False,
+                "entries": [],
+                "ids": [],
+                "autorizados": [],
+            })
+            g["reposicion"] = g["reposicion"] or propia
+            g["entries"].append((reg, meta))
+            g["ids"].append(reg.id)
+            g["autorizados"].append(
+                meta.authorized_person_id
+                if meta is not None and meta.tipo == "autorizado" else None
+            )
+        return list(grupos.values())
+
+    def _send_queue_to_print_center(self) -> None:
+        """Crea las colas en BD y genera/guarda sus PDFs sin bloquear la app.
+
+        Crea una ``ColaImpresion`` por plantilla (una cola normal produce una
+        sola; las reposiciones, una por tipo de tarjeta: alumno, autorizado 1,
+        2…), luego renderiza en segundo plano los PDFs de frentes y vueltas
+        (2 diseños por hoja) de cada una en su carpeta estable (build-safe) y
+        guarda sus rutas. Al terminar, limpia la cola visual y refresca el
+        Centro de Impresión.
+        """
+        grupos = self._queue_groups()
+        if grupos is None:
             return
 
-        plantilla_id = self._combo_templates.currentData()
-        if not plantilla_id:
-            self.set_status("⚠️ Selecciona una plantilla", "warning")
-            return
-
-        if not self._confirmar_incidencias(queue_records):
+        registros_unicos = list({reg.id: reg for g in grupos for reg, _ in g["entries"]}.values())
+        if not self._confirmar_incidencias(registros_unicos):
             return
 
         if getattr(self, "_render_worker", None) is not None:
             self.set_status("⏳ Ya hay una generación en curso...", "warning", toast=False)
             return
 
+        from types import SimpleNamespace
+
         from credencializacion.db.engine import DatabaseSession
         from credencializacion.db.models import ColaImpresion, ItemCola
+        from credencializacion.services.reposiciones import separar_ids
 
         # Perfil de posición por defecto para la cola nueva (el primero
         # disponible). Luego puede regenerarse con otro perfil desde el
@@ -1145,68 +1318,85 @@ class ControlPanel(QWidget):
         perfiles = AppSettings.list_position_profiles()
         perfil_defecto = perfiles[0] if perfiles else None
 
-        ids = [r.id for r in queue_records]
+        cola_ids: list[int] = []
         try:
             with DatabaseSession() as session:
-                plantilla_nombre = self._combo_templates.currentText()
-                cola = ColaImpresion(
-                    nombre=f"{plantilla_nombre} — {len(queue_records)} registros",
-                    total_registros=len(queue_records),
-                    perfil_posicion=perfil_defecto,
-                )
-                session.add(cola)
-                session.flush()
-
-                # Todos los ítems usan el diseño seleccionado. El multiplantillaje
-                # solo intercambia la imagen de fondo por lado, resuelto al
-                # renderizar consultando la ConfiguracionLado del diseño.
-                for orden, reg in enumerate(queue_records, start=1):
-                    session.add(
-                        ItemCola(
-                            cola_id=cola.id,
-                            registro_id=reg.id,
-                            plantilla_id=plantilla_id,
-                            orden=orden,
-                        )
+                for g in grupos:
+                    n = len(g["entries"])
+                    nombre = (
+                        f"Reposiciones · {g['nombre']} — {n} registros"
+                        if g["reposicion"] else f"{g['nombre']} — {n} registros"
                     )
-                cola.total_registros = len(queue_records)
+                    cola = ColaImpresion(
+                        nombre=nombre,
+                        total_registros=n,
+                        perfil_posicion=perfil_defecto,
+                    )
+                    session.add(cola)
+                    session.flush()
+
+                    # Todos los ítems del grupo usan el mismo diseño. El
+                    # multiplantillaje solo intercambia la imagen de fondo por
+                    # lado, resuelto al renderizar consultando la
+                    # ConfiguracionLado del diseño.
+                    for orden, (reg, meta) in enumerate(g["entries"], start=1):
+                        es_aut = meta is not None and meta.tipo == "autorizado"
+                        session.add(
+                            ItemCola(
+                                cola_id=cola.id,
+                                registro_id=reg.id,
+                                plantilla_id=g["plantilla_id"],
+                                orden=orden,
+                                tipo_item="autorizado" if es_aut else "alumno",
+                                autorizado_slot=meta.slot if es_aut else None,
+                                authorized_person_id=(
+                                    meta.authorized_person_id if es_aut else None
+                                ),
+                                credential_request=meta.solicitud if meta else None,
+                            )
+                        )
+                    cola_ids.append(cola.id)
                 session.commit()
-                cola_id = cola.id
         except Exception as e:
             self.set_status(f"❌ Error al guardar cola: {e}", "error")
             return
 
         from credencializacion.utils.paths import get_cola_pdf_dir
 
-        out_dir = str(get_cola_pdf_dir(cola_id))
-        self.set_status("📤 Enviando al Centro de Impresión...", "info", toast=False)
-
-        # Marcar credenciales como 'En impresión' en la API (en segundo plano).
-        first_cliente_id = getattr(queue_records[0], "cliente_id", None)
-        student_ids = self._collect_student_ids(queue_records)
-        if student_ids and first_cliente_id:
-            self._start_bulk_mark(first_cliente_id, "printing", student_ids)
-
-        self._start_render(
-            ids,
-            plantilla_id,
-            out_dir,
-            lambda f, v: self._on_queue_pdfs_ready(cola_id, f, v),
+        self.set_status(
+            "📤 Enviando al Centro de Impresión"
+            + (f" ({len(grupos)} colas)..." if len(grupos) > 1 else "..."),
+            "info", toast=False,
         )
 
-    @staticmethod
-    def _collect_student_ids(registros) -> list[int]:
-        """Extrae los ``student_id`` (id del API) de una lista de registros."""
-        ids: list[int] = []
-        for reg in registros:
-            sid = reg.get_dato("student_id", None) if hasattr(reg, "get_dato") else None
-            if sid in (None, ""):
-                continue
-            try:
-                ids.append(int(sid))
-            except (TypeError, ValueError):
-                continue
-        return ids
+        # Marcar credenciales como 'En impresión' en la API (en segundo plano).
+        # Las tarjetas de autorizado van por `authorized_person_ids`: nunca
+        # deben mover el estatus del alumno.
+        first_cliente_id = getattr(grupos[0]["entries"][0][0], "cliente_id", None)
+        student_ids, authorized_ids = separar_ids(
+            SimpleNamespace(
+                tipo_item=meta.tipo if meta else "alumno",
+                authorized_person_id=meta.authorized_person_id if meta else None,
+                datos=reg.datos,
+            )
+            for g in grupos for reg, meta in g["entries"]
+        )
+        if (student_ids or authorized_ids) and first_cliente_id:
+            self._start_bulk_mark(
+                first_cliente_id, "printing", student_ids, authorized_ids
+            )
+
+        jobs = [
+            {
+                "ids": g["ids"],
+                "plantilla_id": g["plantilla_id"],
+                "out_dir": str(get_cola_pdf_dir(cola_id)),
+                "autorizados": g["autorizados"],
+                "on_ok": (lambda f, v, cid=cola_id: self._save_cola_pdfs(cid, f, v)),
+            }
+            for g, cola_id in zip(grupos, cola_ids)
+        ]
+        self._run_render_jobs(jobs, lambda res: self._on_queues_sent(len(cola_ids), len(res)))
 
     def _client_api_credentials(self, cliente_id: int) -> tuple[str, str]:
         """Devuelve (base_url, api_key) del Cliente, con fallback a constantes."""
@@ -1225,13 +1415,17 @@ class ControlPanel(QWidget):
         return base_url, api_key
 
     def _start_bulk_mark(
-        self, cliente_id: int, action: str, student_ids: list[int]
+        self,
+        cliente_id: int,
+        action: str,
+        student_ids: list[int],
+        authorized_ids: list[int] | None = None,
     ) -> None:
         """Lanza un ``BulkMarkWorker`` para marcar estatus sin bloquear la UI."""
         from credencializacion.ui.status_worker import BulkMarkWorker
 
         base_url, api_key = self._client_api_credentials(cliente_id)
-        worker = BulkMarkWorker(base_url, api_key, action, student_ids)
+        worker = BulkMarkWorker(base_url, api_key, action, student_ids, authorized_ids)
         self._mark_workers.append(worker)
 
         def _on_done(success: bool, message: str, updated: int) -> None:
@@ -1239,6 +1433,8 @@ class ControlPanel(QWidget):
                 self.set_status(
                     f"🔔 Estatus actualizado: {updated} credenciales", "info", toast=False
                 )
+                # Lo marcado 'En impresión' sale de las reposiciones pendientes.
+                self._refresh_reposiciones_count()
             else:
                 self.set_status(
                     f"⚠️ No se pudo actualizar el estatus en la API: {message}",
@@ -1250,10 +1446,8 @@ class ControlPanel(QWidget):
         worker.done.connect(_on_done)
         worker.start()
 
-    def _on_queue_pdfs_ready(
-        self, cola_id: int, frentes_pdf: str, vueltas_pdf: str
-    ) -> None:
-        """Guarda las rutas de PDF en la cola y refresca el Centro de Impresión."""
+    def _save_cola_pdfs(self, cola_id: int, frentes_pdf: str, vueltas_pdf: str) -> None:
+        """Guarda las rutas de los PDFs generados en su cola."""
         from credencializacion.db.engine import DatabaseSession
         from credencializacion.db.models import ColaImpresion
 
@@ -1266,11 +1460,341 @@ class ControlPanel(QWidget):
                     session.commit()
         except Exception as e:
             self.set_status(f"❌ Error al guardar PDFs de la cola: {e}", "error")
-            return
 
-        self.set_status("✅ Cola enviada al Centro de Impresión", "success")
+    def _on_queues_sent(self, total: int, generadas: int) -> None:
+        """Cierra el envío: limpia la cola visual y refresca el Centro de Impresión."""
+        if generadas == total:
+            self.set_status(
+                "✅ Cola enviada al Centro de Impresión" if total == 1
+                else f"✅ {total} colas enviadas al Centro de Impresión",
+                "success",
+            )
+        else:
+            self.set_status(
+                f"⚠️ Se generaron {generadas} de {total} colas; revisa en el "
+                "Centro de Impresión las que quedaron sin PDF.",
+                "warning",
+            )
         self._queue_panel.clear_queue()
         self.add_to_queue_requested.emit()
+
+    # ── Reposiciones ──────────────────────────────────────────────
+
+    def _current_school(self) -> tuple[int | None, int | None]:
+        """``(school_api_id, cliente_id)`` de la escuela seleccionada.
+
+        ``(None, None)`` si no hay selección o es un cliente de Google Sheets
+        (las reposiciones solo existen en la API de MiEscuela).
+        """
+        idx = self._combo_clients.currentIndex()
+        item_data = self._combo_clients.itemData(idx) if idx >= 0 else None
+        if not item_data:
+            return None, None
+        kind, value = item_data
+        if kind != "escuela":
+            return None, None
+
+        from credencializacion.db.engine import get_session
+        from credencializacion.db.models import Cliente
+
+        with get_session() as session:
+            cliente = session.query(Cliente).filter_by(school_api_id=value).first()
+            return value, (cliente.id if cliente is not None else None)
+
+    def _set_reposiciones_label(self, total: int | None) -> None:
+        btn = getattr(self, "btn_reposiciones", None)
+        if btn is None:
+            return
+        btn.setText("Reposiciones" if total is None else f"Reposiciones ({total})")
+
+    def _on_client_changed_reposiciones(self, _index: int) -> None:
+        """Al cambiar de escuela, reinicia y vuelve a consultar el conteo."""
+        self._repos_load_on_done = False
+        self._set_reposiciones_label(None)
+        school_id, _ = self._current_school()
+        btn = getattr(self, "btn_reposiciones", None)
+        if btn is not None:
+            btn.setEnabled(school_id is not None)
+        self._refresh_reposiciones_count()
+
+    def _refresh_reposiciones_count(self) -> None:
+        """Consulta en segundo plano las reposiciones de la escuela actual."""
+        school_id, cliente_id = self._current_school()
+        if school_id is None or cliente_id is None:
+            return
+        worker = getattr(self, "_repos_worker", None)
+        if worker is not None and worker.isRunning():
+            # Al terminar se compara la escuela y, si cambió, se reconsulta.
+            self._repos_requery = True
+            return
+
+        from credencializacion.ui.status_worker import ReposicionesWorker
+
+        self._repos_requery = False
+        base_url, api_key = self._client_api_credentials(cliente_id)
+        self._repos_worker = ReposicionesWorker(base_url, api_key, school_id)
+        self._repos_worker.finished_ok.connect(self._on_reposiciones_ready)
+        self._repos_worker.failed.connect(self._on_reposiciones_failed)
+        self._repos_worker.finished.connect(self._on_repos_worker_finished)
+        self._repos_worker.start()
+
+    def _on_repos_worker_finished(self) -> None:
+        self._repos_worker = None
+        if getattr(self, "_repos_requery", False):
+            self._refresh_reposiciones_count()
+
+    def _on_reposiciones(self) -> None:
+        """Botón «Reposiciones»: carga lo pendiente de la escuela en la cola."""
+        school_id, cliente_id = self._current_school()
+        if school_id is None or cliente_id is None:
+            self.set_status(
+                "⚠️ Selecciona una escuela de MiEscuela para ver sus reposiciones.",
+                "warning",
+            )
+            return
+        self._repos_load_on_done = True
+        self.set_status("⏳ Consultando reposiciones pendientes...", "info", toast=False)
+        worker = getattr(self, "_repos_worker", None)
+        if worker is not None and worker.isRunning():
+            # La consulta en curso puede ser de otra escuela: reconsultar al
+            # terminar garantiza que se cargue la actual.
+            self._repos_requery = True
+            return
+        self._refresh_reposiciones_count()
+
+    @Slot(int, str)
+    def _on_reposiciones_failed(self, school_id: int, message: str) -> None:
+        if school_id != self._current_school()[0]:
+            return
+        if self._repos_load_on_done:
+            self._repos_load_on_done = False
+            self.set_status(f"❌ No se pudieron consultar las reposiciones: {message}", "error")
+
+    @Slot(int, list, list)
+    def _on_reposiciones_ready(self, school_id: int, alumnos: list, con_autorizados: list) -> None:
+        from credencializacion.services import reposiciones
+
+        current_school, cliente_id = self._current_school()
+        if school_id != current_school or cliente_id is None:
+            return  # respuesta de una escuela que ya no se está viendo
+
+        tarjetas = (
+            reposiciones.tarjetas_de_alumnos(alumnos)
+            + reposiciones.tarjetas_de_autorizados(con_autorizados)
+        )
+        self._set_reposiciones_label(len(tarjetas))
+        # Ya es la escuela correcta: no hace falta reconsultar.
+        self._repos_requery = False
+
+        if not self._repos_load_on_done:
+            return
+        self._repos_load_on_done = False
+        if not tarjetas:
+            self.set_status("✅ No hay reposiciones pendientes en esta escuela.", "success")
+            return
+        self._cargar_reposiciones(cliente_id, alumnos + con_autorizados, tarjetas)
+
+    def _upsert_registros_api(self, cliente_id: int, registros: list[dict]) -> None:
+        """Actualiza (o crea) los registros locales con lo recién descargado.
+
+        Así la tarjeta se imprime con los datos vigentes (foto o autorizado
+        recién cambiados) aunque no se haya sincronizado la escuela completa.
+        """
+        from credencializacion.db.engine import DatabaseSession
+        from credencializacion.db.models import Registro
+
+        vistos: set[str] = set()
+        with DatabaseSession() as session:
+            for rec in registros:
+                enrollment = rec.get("enrollment_code") or rec.get("matricula", "")
+                if enrollment in vistos:
+                    continue
+                vistos.add(enrollment)
+                reg = session.query(Registro).filter_by(
+                    cliente_id=cliente_id, enrollment_code=enrollment,
+                ).first()
+                if reg is None:
+                    reg = Registro(
+                        cliente_id=cliente_id,
+                        enrollment_code=enrollment,
+                        estado_impresion="pendiente",
+                    )
+                    session.add(reg)
+                reg.datos = rec
+                reg.credential_status = rec.get("estado_credencial")
+                reg.qr_data = rec.get("qr_data") or rec.get("photo_url", "")
+                reg.photo_path = rec.get("photo_url", "")
+            session.commit()
+
+    def _cached_pixmap(self, url: str) -> "QPixmap | None":
+        """Foto desde el caché en memoria o en disco (sin descargar)."""
+        if not url:
+            return None
+        pixmap = self._raw_photo_cache.get(url)
+        if pixmap is not None:
+            return pixmap
+        try:
+            ruta = self._photo_disk_path(url)
+            if ruta.exists():
+                pixmap = QPixmap(str(ruta))
+                if not pixmap.isNull():
+                    return pixmap
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+
+    def _plantillas_reposicion(self, cliente_id: int) -> tuple[list[tuple[int, str]], dict[str, int]]:
+        """Plantillas de la escuela y el mapa vigente tipo de tarjeta → plantilla."""
+        from credencializacion.db.engine import get_session
+        from credencializacion.db.models import Cliente, Plantilla
+        from credencializacion.services import reposiciones
+
+        with get_session() as session:
+            plantillas = [
+                (p.id, p.nombre)
+                for p in session.query(Plantilla)
+                .filter_by(cliente_id=cliente_id)
+                .order_by(Plantilla.nombre)
+                .all()
+            ]
+            cliente = session.query(Cliente).get(cliente_id)
+            cfg = dict((cliente.config or {}) if cliente is not None else {})
+        mapa = reposiciones.resolver_plantillas(
+            plantillas, cfg.get(reposiciones.CONFIG_PLANTILLAS)
+        )
+        return plantillas, mapa
+
+    def _on_configurar_plantillas_reposicion(self) -> None:
+        """Menú «Plantillas de reposición…»: asigna el diseño de cada tarjeta."""
+        from credencializacion.db.engine import DatabaseSession
+        from credencializacion.db.models import Cliente
+        from credencializacion.services.reposiciones import CONFIG_PLANTILLAS
+        from credencializacion.ui.dialogs.reposicion_plantillas_dialog import (
+            ReposicionPlantillasDialog,
+        )
+
+        _, cliente_id = self._current_school()
+        if cliente_id is None:
+            self.set_status("⚠️ Selecciona una escuela primero.", "warning")
+            return
+        plantillas, mapa = self._plantillas_reposicion(cliente_id)
+        if not plantillas:
+            self.set_status("⚠️ Esta escuela no tiene plantillas.", "warning")
+            return
+        dlg = ReposicionPlantillasDialog(plantillas, mapa, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        with DatabaseSession() as session:
+            cliente = session.query(Cliente).get(cliente_id)
+            if cliente is None:
+                return
+            cfg = dict(cliente.config or {})
+            cfg[CONFIG_PLANTILLAS] = dlg.result_map()
+            cliente.config = cfg
+            session.commit()
+        self.set_status("✅ Plantillas de reposición guardadas.", "success")
+
+    def _cargar_reposiciones(self, cliente_id: int, registros_api: list[dict], tarjetas: list) -> None:
+        """Llena la cola visual con las tarjetas de reposición de la escuela.
+
+        Cada tarjeta lleva su plantilla: la de alumno, o la del autorizado N.
+        Si un autorizado N no tiene plantilla propia se usa la de otro
+        autorizado (el render copia los datos de la persona a esa posición);
+        si falta la de alumno, se usa la elegida en el combo. Lo que siga sin
+        plantilla no se agrega y se avisa.
+        """
+        from credencializacion.db.engine import get_session
+        from credencializacion.db.models import Registro
+        from credencializacion.services import reposiciones
+        from credencializacion.ui.widgets.print_queue import QueueMeta
+
+        try:
+            self._upsert_registros_api(cliente_id, registros_api)
+        except Exception as e:  # noqa: BLE001
+            self.set_status(f"❌ Error al guardar los registros: {e}", "error")
+            return
+
+        # Recargar la tabla para que muestre los datos recién guardados.
+        with get_session() as session:
+            db_registros = session.query(Registro).filter_by(cliente_id=cliente_id).all()
+            session.expunge_all()
+        self.load_records(db_registros)
+        por_matricula = {r.enrollment_code: r for r in db_registros}
+
+        plantillas, mapa = self._plantillas_reposicion(cliente_id)
+        nombres = dict(plantillas)
+        combo_id = self._combo_templates.currentData()
+        respaldo_aut = next(
+            (mapa[f"autorizado_{n}"] for n in reposiciones.SLOTS_AUTORIZADO
+             if f"autorizado_{n}" in mapa),
+            None,
+        )
+
+        orden = sorted(
+            tarjetas,
+            key=lambda t: (t.tipo != reposiciones.TIPO_ALUMNO, t.slot or 0),
+        )
+        agregadas = {"alumno": 0, "autorizado": 0}
+        sin_plantilla: list[str] = []
+        prestadas: set[int] = set()
+        for t in orden:
+            reg = por_matricula.get(t.enrollment_code)
+            if reg is None:
+                continue
+            pid = mapa.get(t.clave_plantilla)
+            if pid is None and t.tipo == reposiciones.TIPO_ALUMNO:
+                pid = combo_id
+            if pid is None and t.tipo == reposiciones.TIPO_AUTORIZADO and respaldo_aut:
+                pid = respaldo_aut
+                prestadas.add(t.slot)
+            if pid is None:
+                sin_plantilla.append(
+                    "Alumno" if t.tipo == reposiciones.TIPO_ALUMNO else f"Autorizado {t.slot}"
+                )
+                continue
+
+            es_aut = t.tipo == reposiciones.TIPO_AUTORIZADO
+            foto = str(reg.get_dato(f"autorizado_{t.slot}_foto", "") or "") if es_aut else ""
+            meta = QueueMeta(
+                tipo=t.tipo,
+                slot=t.slot,
+                authorized_person_id=t.authorized_person_id,
+                solicitud=t.solicitud,
+                plantilla_id=pid,
+                plantilla_nombre=nombres.get(pid, self._combo_templates.currentText()),
+                etiqueta=t.etiqueta,
+                nombre=t.nombre,
+                foto=foto,
+            )
+            pixmap = self._cached_pixmap(foto if es_aut else (reg.photo_path or ""))
+            self._queue_panel.add_to_queue(reg, pixmap, meta=meta, render=False)
+            agregadas[t.tipo] += 1
+        self._queue_panel.refresh()
+
+        total = agregadas["alumno"] + agregadas["autorizado"]
+        partes = []
+        if agregadas["alumno"]:
+            partes.append(f"{agregadas['alumno']} de alumno")
+        if agregadas["autorizado"]:
+            partes.append(f"{agregadas['autorizado']} de autorizado")
+        mensaje = f"✅ {total} reposición(es) en la cola" + (
+            f" ({', '.join(partes)})." if partes else "."
+        )
+        nivel = "success"
+        if prestadas:
+            mensaje += (
+                " Autorizado " + ", ".join(str(n) for n in sorted(prestadas))
+                + " sin plantilla propia: se usa la de otro autorizado."
+            )
+            nivel = "warning"
+        if sin_plantilla:
+            faltan = sorted(set(sin_plantilla))
+            mensaje += (
+                f" ⚠️ {len(sin_plantilla)} sin plantilla ({', '.join(faltan)}): "
+                "asígnala en Reposiciones ▸ Plantillas de reposición…"
+            )
+            nivel = "warning"
+        self.set_status(mensaje, nivel)
 
     def _on_search_changed(self, text: str) -> None:
         """Filtra registros por texto de búsqueda en cualquier campo."""
@@ -1588,8 +2112,13 @@ class ControlPanel(QWidget):
 
     # ── Prefetch de fotos en segundo plano ──────────────────────────
 
-    def _on_refresh_photos(self) -> None:
+    def _on_refresh_photos(self, todas: bool = False) -> None:
         """Actualiza las fotos del cliente cargado (servidor y/o Google Sheets).
+
+        Con ``todas=True`` el alcance son las fotos de TODAS las escuelas y
+        clientes: se limpian del caché y se re-descargan las de la escuela
+        visible; las demás se vuelven a bajar al abrir su escuela o al
+        imprimir (el caché se llena solo, bajo demanda).
 
         - Fotos del servidor (URL http): se borran del caché en disco y se
           vuelven a descargar (prefetch).
@@ -1602,12 +2131,25 @@ class ControlPanel(QWidget):
         from PySide6.QtWidgets import QMessageBox
 
         records = getattr(self, "_all_records", []) or []
-        con_foto = [r for r in records if getattr(r, "photo_path", "")]
-        urls = {r.photo_path for r in con_foto if str(r.photo_path).startswith("http")}
-        locales = [r for r in con_foto if not str(r.photo_path).startswith("http")]
+        if todas:
+            from credencializacion.db.engine import get_session
+            from credencializacion.db.models import Registro
 
-        if not con_foto:
+            with get_session() as session:
+                rutas = [
+                    p for (p,) in session.query(Registro.photo_path)
+                    .filter(Registro.photo_path.isnot(None), Registro.photo_path != "")
+                    .all()
+                ]
+        else:
+            rutas = [r.photo_path for r in records if getattr(r, "photo_path", "")]
+        urls = {str(p) for p in rutas if str(p).startswith("http")}
+        locales = [p for p in rutas if not str(p).startswith("http")]
+
+        if not rutas:
             self.set_status(
+                "⚠️ No hay fotos que actualizar."
+                if todas else
                 "⚠️ No hay fotos que actualizar (selecciona una escuela primero).",
                 "warning",
             )
@@ -1618,10 +2160,19 @@ class ControlPanel(QWidget):
             partes.append(f"{len(urls)} del servidor (se re-descargan)")
         if locales:
             partes.append(f"{len(locales)} locales de Google Sheets (se releen)")
+        alcance = (
+            "de TODAS las escuelas" if todas else "de la escuela seleccionada"
+        )
+        nota = (
+            "\n\nSe re-descargan ahora las de la escuela visible; las demás, "
+            "al abrir su escuela o al imprimir."
+            if todas else ""
+        )
         resp = QMessageBox.question(
             self,
             "Actualizar fotos",
-            "Se actualizarán las fotos: " + " y ".join(partes) + ".\n\n"
+            f"Se actualizarán las fotos {alcance}: " + " y ".join(partes) + "."
+            + nota + "\n\n"
             "Úsalo si cambiaste una foto o alguna no carga. ¿Continuar?",
         )
         if resp != QMessageBox.StandardButton.Yes:
@@ -1727,16 +2278,82 @@ class ControlPanel(QWidget):
         if btn is not None:
             btn.setEnabled(enabled)
 
-    def _on_sync_api(self) -> None:
-        """Sincroniza escuelas y alumnos desde la API de MiEscuela (asíncrono)."""
+    def has_client_selected(self) -> bool:
+        """True si hay una escuela o cliente elegido en el combo."""
+        return self._combo_clients.currentData() is not None
+
+    def _on_sync_selected(self) -> None:
+        """Sincroniza solo el cliente seleccionado, desde su propio origen.
+
+        Una escuela de MiEscuela se baja de la API; un cliente de Google
+        Sheets, de su pestaña. Es mucho más rápida que la sincronización
+        completa, que crece con la base.
+        """
+        item_data = self._combo_clients.currentData()
+        if item_data is None:
+            self.set_status(
+                "⚠️ Selecciona una escuela para sincronizarla, o usa «Sincronizar todo».",
+                "warning",
+            )
+            return
+        kind, value = item_data
+        if kind == "escuela":
+            self._on_sync_api(school_api_id=value)
+            return
+
+        from credencializacion.db.engine import get_session
+        from credencializacion.db.models import Cliente
+
+        with get_session() as session:
+            cliente = session.query(Cliente).get(value)
+            nombre = cliente.nombre if cliente is not None else None
+        if nombre is None:
+            self.set_status("⚠️ Cliente no encontrado", "warning")
+            return
+        self._on_sync_sheets(solo_cliente=nombre)
+
+    def _sync_label(self) -> str:
+        """Nombre visible del cliente seleccionado (sin el conteo de alumnos)."""
+        texto = self._combo_clients.currentText()
+        return texto.split(" (")[0].replace("🏢 ", "").strip()
+
+    def _restore_client_selection(self) -> None:
+        """Tras recargar el combo, vuelve a elegir el cliente que se veía.
+
+        Al reelegirlo se recargan sus registros (ya con lo sincronizado) y el
+        conteo de reposiciones. Si ya no está, queda sin selección.
+        """
+        item_data = getattr(self, "_sync_keep_selection", None)
+        self._sync_keep_selection = None
+        if item_data is None:
+            return
+        # `findData` no compara bien las tuplas ("escuela", id) guardadas como
+        # objeto Python: se busca a mano.
+        for idx in range(self._combo_clients.count()):
+            if self._combo_clients.itemData(idx) == item_data:
+                self._combo_clients.setCurrentIndex(idx)
+                return
+
+    def _on_sync_api(self, school_api_id: int | None = None) -> None:
+        """Sincroniza desde la API de MiEscuela (asíncrono).
+
+        ``school_api_id`` limita la sincronización a esa escuela; sin él se
+        sincronizan todas.
+        """
         if getattr(self, "_sync_worker", None) is not None:
             self.set_status("⏳ Ya hay una sincronización en curso...", "warning", toast=False)
             return
 
         self._set_sync_enabled(False)
-        self.set_status("Iniciando sincronización...", "info", toast=False)
+        self._sync_keep_selection = self._combo_clients.currentData()
+        self._sync_single = self._sync_label() if school_api_id is not None else None
+        self.set_status(
+            f"Iniciando sincronización de «{self._sync_single}»..."
+            if self._sync_single else "Iniciando sincronización de todas las escuelas...",
+            "info", toast=False,
+        )
 
-        self._sync_worker = SyncWorker()
+        self._sync_worker = SyncWorker(school_api_id)
         self._sync_worker.progress.connect(self.set_status)
         self._sync_worker.finished_ok.connect(self._on_sync_finished)
         self._sync_worker.failed.connect(self._on_sync_failed)
@@ -1747,8 +2364,12 @@ class ControlPanel(QWidget):
     ) -> None:
         self._set_sync_enabled(True)
         self._load_clients_combo()
+        self._restore_client_selection()
 
-        msg = f"✅ Sincronización completada — {count_schools} escuelas, {count_students} alumnos guardados."
+        if getattr(self, "_sync_single", None):
+            msg = f"✅ «{self._sync_single}» sincronizada — {count_students} alumnos guardados."
+        else:
+            msg = f"✅ Sincronización completada — {count_schools} escuelas, {count_students} alumnos guardados."
         depurados = reporte.get("depurados", 0)
         if depurados:
             msg += f" 🧹 {depurados} registros depurados (borrados en la plataforma)."
@@ -1778,11 +2399,14 @@ class ControlPanel(QWidget):
 
     def _on_sync_failed(self, error_msg: str) -> None:
         self._set_sync_enabled(True)
+        self._sync_keep_selection = None
         self.set_status(f"❌ Error de sincronización: {error_msg}", "error", toast=True)
         self._sync_worker = None
 
-    def _on_sync_sheets(self) -> None:
+    def _on_sync_sheets(self, solo_cliente: str | None = None) -> None:
         """Sincroniza el documento de Google Sheets configurado (asíncrono).
+
+        ``solo_cliente`` limita la sincronización a la pestaña de ese cliente.
 
         Comparte el mismo guardián de "sincronización en curso" y el mismo
         botón que la sincronización de la API miescuela.net: solo puede
@@ -1807,9 +2431,17 @@ class ControlPanel(QWidget):
             return
 
         self._set_sync_enabled(False)
-        self.set_status(f"Iniciando sincronización de «{document_name}»...", "info", toast=False)
+        self._sync_keep_selection = self._combo_clients.currentData()
+        self._sync_single = solo_cliente
+        self.set_status(
+            f"Iniciando sincronización de «{solo_cliente}»..." if solo_cliente
+            else f"Iniciando sincronización de «{document_name}»...",
+            "info", toast=False,
+        )
 
-        self._sync_worker = SheetsSyncWorker(credentials_path, document_name)
+        self._sync_worker = SheetsSyncWorker(
+            credentials_path, document_name, solo_cliente=solo_cliente
+        )
         self._sync_worker.progress.connect(self.set_status)
         self._sync_worker.finished_ok.connect(self._on_sheets_sync_finished)
         self._sync_worker.failed.connect(self._on_sync_failed)
@@ -1820,11 +2452,15 @@ class ControlPanel(QWidget):
     ) -> None:
         self._set_sync_enabled(True)
         self._load_clients_combo()
+        self._restore_client_selection()
 
-        msg = (
-            f"✅ Sincronización de Google Sheets completada — "
-            f"{count_clientes} clientes, {count_registros} registros guardados."
-        )
+        if getattr(self, "_sync_single", None):
+            msg = f"✅ «{self._sync_single}» sincronizado — {count_registros} registros guardados."
+        else:
+            msg = (
+                f"✅ Sincronización de Google Sheets completada — "
+                f"{count_clientes} clientes, {count_registros} registros guardados."
+            )
         depurados = reporte.get("depurados", 0)
         if depurados:
             msg += f" 🧹 {depurados} registros depurados (borrados en el documento)."

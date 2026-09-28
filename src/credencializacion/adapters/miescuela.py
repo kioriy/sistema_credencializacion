@@ -4,6 +4,9 @@ Adaptador para la API de MiEscuela.net.
 Se conecta a los endpoints de credencialización del backend Laravel:
 - ``GET /api/credentials/schools`` — lista de escuelas
 - ``GET /api/credentials/export`` — alumnos por escuela
+- ``POST /api/credentials/bulk-mark-printing`` / ``bulk-mark-ready`` — estatus
+  en lote de alumnos (``student_ids``) y de autorizados
+  (``authorized_person_ids``)
 
 Header de autenticación: ``X-Credential-Key``.
 """
@@ -207,6 +210,28 @@ class MiEscuelaAdapter(DataAdapter):
         logger.info("Se obtuvieron %d registros.", len(raw_records))
         return [self._flatten_record(rec) for rec in raw_records]
 
+    def fetch_reposiciones(self, school_id: int) -> tuple[list[dict], list[dict]]:
+        """Descarga lo pendiente de reposición de una escuela.
+
+        Son dos consultas porque la API las separa:
+
+        - ``status=replacement_requested``: alumnos cuya credencial se repone.
+        - ``status=authorized_requests``: alumnos con al menos un autorizado
+          oficial con tarjeta por imprimir (reposición o credencial nueva). El
+          estatus del alumno no importa aquí: puede venir ``delivered``, así
+          que de estos registros solo se imprimen los autorizados marcados.
+
+        Returns:
+            ``(alumnos, con_autorizados)``, ambos ya aplanados.
+        """
+        alumnos = self.fetch_records(
+            school_id=school_id, status="replacement_requested",
+        )
+        con_autorizados = self.fetch_records(
+            school_id=school_id, status="authorized_requests",
+        )
+        return alumnos, con_autorizados
+
     def get_columns(self) -> list[str]:
         """Columnas estandarizadas que produce este adaptador."""
         return list(_STUDENT_COLUMNS)
@@ -216,48 +241,94 @@ class MiEscuelaAdapter(DataAdapter):
 
     # ── API: Marcar estatus de credenciales en lote ──────────────────
 
-    def mark_printing(self, student_ids: list[int]) -> dict:
+    def mark_printing(
+        self,
+        student_ids: list[int] | None = None,
+        authorized_person_ids: list[int] | None = None,
+    ) -> dict:
         """Marca las credenciales indicadas como 'En impresión'.
 
         Args:
-            student_ids: IDs de alumno (campo ``id`` del API).
+            student_ids: IDs de alumno (campo ``id`` del API). Mueven solo el
+                estatus del alumno.
+            authorized_person_ids: IDs de autorizado. Basta uno por tarjeta:
+                el servidor mueve todas las filas de esa persona en la familia
+                y nunca toca el estatus del alumno.
 
         Returns:
-            La respuesta JSON del endpoint (``success``, ``message``, ``updated``).
+            La respuesta JSON del endpoint (``success``, ``message``,
+            ``updated``, ``authorized_updated``, ``authorized_skipped``).
         """
-        return self._bulk_mark(self.ENDPOINT_MARK_PRINTING, student_ids)
+        return self._bulk_mark(
+            self.ENDPOINT_MARK_PRINTING, student_ids, authorized_person_ids,
+        )
 
-    def mark_ready(self, student_ids: list[int]) -> dict:
+    def mark_ready(
+        self,
+        student_ids: list[int] | None = None,
+        authorized_person_ids: list[int] | None = None,
+    ) -> dict:
         """Marca las credenciales indicadas como 'Listas/Impresas'.
 
-        Args:
-            student_ids: IDs de alumno (campo ``id`` del API).
+        Mismos argumentos que :meth:`mark_printing`.
 
         Returns:
             La respuesta JSON del endpoint.
         """
-        return self._bulk_mark(self.ENDPOINT_MARK_READY, student_ids)
+        return self._bulk_mark(
+            self.ENDPOINT_MARK_READY, student_ids, authorized_person_ids,
+        )
 
-    def _bulk_mark(self, endpoint: str, student_ids: list[int]) -> dict:
+    @staticmethod
+    def _ids_validos(valores: list | None) -> list[int]:
+        """Convierte a enteros, descartando vacíos y duplicados (en orden)."""
+        ids: list[int] = []
+        for v in valores or []:
+            if v in (None, ""):
+                continue
+            try:
+                n = int(v)
+            except (TypeError, ValueError):
+                continue
+            if n not in ids:
+                ids.append(n)
+        return ids
+
+    def _bulk_mark(
+        self,
+        endpoint: str,
+        student_ids: list[int] | None,
+        authorized_person_ids: list[int] | None = None,
+    ) -> dict:
         """POST genérico para los endpoints de marcado en lote.
 
-        Filtra IDs vacíos/None y envía ``{"student_ids": [...]}``.
+        Filtra IDs vacíos/None y envía ``student_ids`` y/o
+        ``authorized_person_ids`` (solo las listas que traigan algo).
 
         Raises:
             ValueError: Si no hay IDs válidos para enviar.
             ConnectionError: Si la API no responde o devuelve error.
         """
-        ids = [int(s) for s in student_ids if s not in (None, "")]
-        if not ids:
-            raise ValueError("No hay student_ids válidos para marcar.")
+        ids = self._ids_validos(student_ids)
+        aut_ids = self._ids_validos(authorized_person_ids)
+        if not ids and not aut_ids:
+            raise ValueError("No hay IDs válidos para marcar.")
+
+        body: dict[str, list[int]] = {}
+        if ids:
+            body["student_ids"] = ids
+        if aut_ids:
+            body["authorized_person_ids"] = aut_ids
 
         url = f"{self._base_url}{endpoint}"
         headers = {**self._headers, "Content-Type": "application/json"}
-        logger.info("POST %s (%d ids)", url, len(ids))
+        logger.info(
+            "POST %s (%d alumnos, %d autorizados)", url, len(ids), len(aut_ids),
+        )
 
         try:
             response = self._session.post(
-                url, headers=headers, json={"student_ids": ids},
+                url, headers=headers, json=body,
                 timeout=_REQUEST_TIMEOUT,
             )
             response.raise_for_status()
@@ -270,7 +341,10 @@ class MiEscuelaAdapter(DataAdapter):
         try:
             return response.json()
         except ValueError:
-            return {"success": True, "message": "", "updated": len(ids)}
+            return {
+                "success": True, "message": "", "updated": len(ids),
+                "authorized_updated": len(aut_ids),
+            }
 
     # ── Lógica interna ───────────────────────────────────────────────
 
@@ -364,6 +438,31 @@ class MiEscuelaAdapter(DataAdapter):
                 or ""
             )
             record[f"autorizado_{i}_email"] = email
+
+        # Estatus de la tarjeta de cada autorizado (reposiciones y credenciales
+        # nuevas). Va en una lista anidada —no en claves `autorizado_N_*`—
+        # porque son datos de control, no de diseño: así no aparecen como
+        # atributos en el editor. `slot` es la N de `autorizado_N_*`.
+        # `extra_authorized_persons` no se lee: la API indica que nunca se
+        # imprime.
+        estatus_autorizados: list[dict[str, Any]] = []
+        for i, persona in enumerate(authorized, start=1):
+            if not isinstance(persona, dict):
+                continue
+            estatus_autorizados.append({
+                "slot": i,
+                "person_id": persona.get("authorized_person_id"),
+                "codigo": record.get(f"autorizado_{i}_id", ""),
+                "request": persona.get("credential_request"),
+                "status": persona.get("credential_status"),
+                "printable": bool(persona.get("printable")),
+                "requested_at": (
+                    persona.get("credential_replacement_requested_at")
+                    if persona.get("credential_request") == "replacement"
+                    else persona.get("credential_extra_requested_at")
+                ),
+            })
+        record["autorizados_estatus"] = estatus_autorizados
 
         # Correo del tutor principal (vínculo de familia). El endpoint lo
         # entrega en el nivel superior del alumno (`tutor_email`); si no

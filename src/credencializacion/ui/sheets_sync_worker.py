@@ -38,10 +38,18 @@ class SheetsSyncWorker(QThread):
     finished_ok = Signal(int, int, dict)  # clientes, registros, reporte
     failed = Signal(str)
 
-    def __init__(self, credentials_path: str, document_name: str) -> None:
+    def __init__(
+        self,
+        credentials_path: str,
+        document_name: str,
+        solo_cliente: str | None = None,
+    ) -> None:
         super().__init__()
         self._credentials_path = credentials_path
         self._document_name = document_name
+        # Nombre de la pestaña (= nombre del cliente) a sincronizar sola;
+        # None sincroniza todas.
+        self._solo_cliente = solo_cliente
 
     def run(self) -> None:  # noqa: D401
         from credencializacion.adapters.sheets import (
@@ -79,6 +87,15 @@ class SheetsSyncWorker(QThread):
                 f"El documento '{self._document_name}' no tiene pestañas."
             )
             return
+
+        if self._solo_cliente is not None:
+            worksheets = [w for w in worksheets if w.title == self._solo_cliente]
+            if not worksheets:
+                self.failed.emit(
+                    f"No hay una pestaña «{self._solo_cliente}» en "
+                    f"'{self._document_name}'."
+                )
+                return
 
         total_registros = 0
         total_depurados = 0

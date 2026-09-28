@@ -671,6 +671,12 @@ class PrintCenter(QWidget):
                     if item.registro:
                         datos = item.registro.datos or {}
                         nombre = f"{datos.get('nombre', '')} {datos.get('apellido', '')}".strip()
+                        # Tarjeta de autorizado: la persona impresa, y de qué alumno.
+                        if item.tipo_item == "autorizado" and item.autorizado_slot:
+                            persona = str(
+                                datos.get(f"autorizado_{item.autorizado_slot}_nombre", "") or ""
+                            ).strip()
+                            nombre = f"{persona or 'Autorizado'} (autorizado de {nombre})"
                     name_item = QTableWidgetItem(nombre or "Sin nombre")
                     name_item.setFont(QFont("Inter", 12, QFont.Weight.DemiBold))
                     self._detail_table.setItem(row, 1, name_item)
@@ -888,6 +894,7 @@ class PrintCenter(QWidget):
                     cola.perfil_posicion = perfil_name
 
                 record_ids = [it.registro_id for it in items]
+                autorizados = self._autorizados_de(items)
                 plantilla_id = items[0].plantilla_id
                 session.commit()
         except Exception as e:
@@ -908,6 +915,7 @@ class PrintCenter(QWidget):
                 cola_id, f, v, msg, then_print=then_print
             ),
             perfil=perfil,
+            autorizados=autorizados,
         )
 
     def _copy_selected_queue(self) -> None:
@@ -954,6 +962,15 @@ class PrintCenter(QWidget):
                 nombre_original = cola.nombre
                 plantilla_actual_id = plantilla_actual.id
                 record_ids = [it.registro_id for it in items]
+                # La copia conserva qué tarjeta es cada ítem (alumno o
+                # autorizado) para que el marcado de estatus siga siendo
+                # correcto.
+                metas = [
+                    (it.tipo_item, it.autorizado_slot,
+                     it.authorized_person_id, it.credential_request)
+                    for it in items
+                ]
+                autorizados = self._autorizados_de(items)
         except Exception as e:
             self.set_status(f"❌ Error al leer la cola: {e}", "error")
             return
@@ -974,13 +991,20 @@ class PrintCenter(QWidget):
                 )
                 session.add(nueva)
                 session.flush()
-                for orden, reg_id in enumerate(record_ids, start=1):
+                for orden, (reg_id, meta) in enumerate(
+                    zip(record_ids, metas), start=1
+                ):
+                    tipo_item, slot, person_id, solicitud = meta
                     session.add(
                         ItemCola(
                             cola_id=nueva.id,
                             registro_id=reg_id,
                             plantilla_id=plantilla_id,
                             orden=orden,
+                            tipo_item=tipo_item or "alumno",
+                            autorizado_slot=slot,
+                            authorized_person_id=person_id,
+                            credential_request=solicitud,
                         )
                     )
                 session.commit()
@@ -1006,6 +1030,7 @@ class PrintCenter(QWidget):
             plantilla_id,
             str(get_cola_pdf_dir(nueva_id)),
             _on_copy_done,
+            autorizados=autorizados,
         )
 
     def _compose_from_folder(self) -> None:
@@ -1137,7 +1162,17 @@ class PrintCenter(QWidget):
 
     # ── Render en segundo plano ─────────────────────────────────────
 
-    def _start_render(self, record_ids, plantilla_id, out_dir, on_done, perfil=None) -> None:
+    @staticmethod
+    def _autorizados_de(items) -> list[int | None]:
+        """``authorized_person_id`` por ítem (None en tarjetas de alumno)."""
+        return [
+            it.authorized_person_id if it.tipo_item == "autorizado" else None
+            for it in items
+        ]
+
+    def _start_render(
+        self, record_ids, plantilla_id, out_dir, on_done, perfil=None, autorizados=None,
+    ) -> None:
         """Lanza un ``QueueRenderWorker`` y enruta sus señales.
 
         ``on_done`` se invoca en el hilo principal con (frentes_pdf,
@@ -1148,7 +1183,7 @@ class PrintCenter(QWidget):
 
         self._render_on_done = on_done
         self._render_worker = QueueRenderWorker(
-            record_ids, plantilla_id, out_dir, perfil=perfil
+            record_ids, plantilla_id, out_dir, perfil=perfil, autorizados=autorizados
         )
         self._render_worker.progress.connect(
             lambda m: self.set_status(m, "info", toast=False)
@@ -1344,8 +1379,10 @@ class PrintCenter(QWidget):
     def _mark_queue_ready(self) -> None:
         """Marca las credenciales de la cola como 'Listas/Impresas' en la API.
 
-        Recolecta los ``student_id`` de los registros de la cola y hace el POST
-        a ``bulk-mark-ready`` en segundo plano. Al confirmar, marca la cola como
+        Recolecta los ``student_id`` de las tarjetas de alumno y los
+        ``authorized_person_id`` de las de autorizado (que nunca mueven el
+        estatus del alumno) y hace el POST a ``bulk-mark-ready`` en segundo
+        plano. Al confirmar, marca la cola como
         completada localmente.
         """
         if not self._selected_cola_id:
@@ -1367,26 +1404,16 @@ class PrintCenter(QWidget):
                     self.set_status("⚠️ La cola está vacía", "warning")
                     return
 
-                student_ids: list[int] = []
-                cliente_id = None
-                for it in items:
-                    reg = it.registro
-                    if reg is None:
-                        continue
-                    if cliente_id is None:
-                        cliente_id = reg.cliente_id
-                    sid = (reg.datos or {}).get("student_id")
-                    if sid in (None, ""):
-                        continue
-                    try:
-                        student_ids.append(int(sid))
-                    except (TypeError, ValueError):
-                        continue
+                from credencializacion.services.reposiciones import separar_ids
+
+                vigentes = [it for it in items if it.registro is not None]
+                cliente_id = vigentes[0].registro.cliente_id if vigentes else None
+                student_ids, authorized_ids = separar_ids(vigentes)
         except Exception as e:
             self.set_status(f"❌ Error al leer la cola: {e}", "error")
             return
 
-        if not student_ids:
+        if not student_ids and not authorized_ids:
             self.set_status(
                 "⚠️ Los registros no tienen student_id (vuelve a sincronizar)",
                 "warning",
@@ -1398,7 +1425,9 @@ class PrintCenter(QWidget):
         from credencializacion.ui.status_worker import BulkMarkWorker
 
         cola_id = self._selected_cola_id
-        worker = BulkMarkWorker(base_url, api_key, "ready", student_ids)
+        worker = BulkMarkWorker(
+            base_url, api_key, "ready", student_ids, authorized_ids
+        )
         self._mark_workers.append(worker)
         self.set_status("🔔 Marcando credenciales como impresas...", "info", toast=False)
 

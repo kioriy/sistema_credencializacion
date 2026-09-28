@@ -379,6 +379,21 @@ class ItemCola(Base):
         String(50), nullable=False, default="pendiente"
     )  # "pendiente", "frente_impreso", "vuelta_impresa", "completado"
 
+    # Qué tarjeta del registro se imprime. "alumno" (default, colas normales)
+    # o "autorizado": la tarjeta de un autorizado del alumno (reposición o
+    # credencial nueva). Decide qué id se manda a `bulk-mark-*`: una tarjeta
+    # de autorizado NUNCA mueve el estatus del alumno.
+    tipo_item: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="alumno", server_default="alumno"
+    )
+    # Posición N (`autorizado_N_*`) del autorizado al crear la cola.
+    autorizado_slot: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # `authorized_person_id` del API: identifica a la persona aunque la API
+    # reordene a los autorizados del alumno.
+    authorized_person_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # "replacement" | "new" (solo informativo, para la cola).
+    credential_request: Mapped[str | None] = mapped_column(String(20), nullable=True)
+
     # Relaciones
     cola: Mapped["ColaImpresion"] = relationship(back_populates="items")
     registro: Mapped["Registro"] = relationship()

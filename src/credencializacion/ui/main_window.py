@@ -137,9 +137,28 @@ class MainWindow(QMainWindow):
         self.btn_preview.clicked.connect(self._control_panel._on_preview)
         self.btn_add_queue.clicked.connect(self._control_panel._add_selected_to_queue)
         self.btn_sync.clicked.connect(self._on_sync_clicked)
-        self.btn_refresh_photos.clicked.connect(self._control_panel._on_refresh_photos)
+        self.action_sync_selected.triggered.connect(self._control_panel._on_sync_selected)
+        self.action_sync_all.triggered.connect(self._on_sync_all)
+        self.btn_refresh_photos.clicked.connect(
+            lambda: self._control_panel._on_refresh_photos(todas=False)
+        )
+        self.action_photos_selected.triggered.connect(
+            lambda: self._control_panel._on_refresh_photos(todas=False)
+        )
+        self.action_photos_all.triggered.connect(
+            lambda: self._control_panel._on_refresh_photos(todas=True)
+        )
         # El panel deshabilita este botón mientras la sincronización corre
         self._control_panel.btn_sync_api = self.btn_sync
+        # Reposiciones: el panel actualiza el conteo en el texto del botón.
+        self._control_panel.btn_reposiciones = self.btn_reposiciones
+        self.btn_reposiciones.clicked.connect(self._control_panel._on_reposiciones)
+        self.action_repos_plantillas.triggered.connect(
+            self._control_panel._on_configurar_plantillas_reposicion
+        )
+        self.action_repos_contar.triggered.connect(
+            self._control_panel._refresh_reposiciones_count
+        )
 
     # ----------------------------------------------------- sincronización
     def _set_sync_source(self, source: str) -> None:
@@ -155,14 +174,29 @@ class MainWindow(QMainWindow):
         }
         self._sync_source = source
         etiqueta = etiquetas.get(source, source)
-        self.btn_sync.setToolTip(f"Sincronizar desde {etiqueta}")
+        self.btn_sync.setToolTip(
+            f"Sincroniza la escuela seleccionada; «Sincronizar todo» usa {etiqueta}."
+        )
         self._control_panel.set_status(
-            f"Origen de sincronización: {etiqueta} — pulsa «Sincronizar» para iniciar.",
+            f"Origen de sincronización: {etiqueta} — se usa en «Sincronizar todo» "
+            "(o al pulsar Sincronizar sin escuela seleccionada).",
             "sync",
         )
 
     def _on_sync_clicked(self) -> None:
-        """Lanza la sincronización con el origen seleccionado en el menú."""
+        """Botón Sincronizar: la escuela seleccionada o, sin selección, todo.
+
+        Con una escuela elegida solo se baja esa (su origen lo decide el tipo
+        de cliente). Sin selección se sincroniza todo desde el origen elegido
+        en el menú; también se puede forzar con «Sincronizar todo».
+        """
+        if self._control_panel.has_client_selected():
+            self._control_panel._on_sync_selected()
+            return
+        self._on_sync_all()
+
+    def _on_sync_all(self) -> None:
+        """Sincroniza todo desde el origen seleccionado en el menú."""
         source = getattr(self, "_sync_source", "api")
         if source == "sheets":
             self._control_panel._on_sync_sheets()
@@ -217,7 +251,14 @@ class MainWindow(QMainWindow):
         self.action_sync_app = self.menu_sync.addAction("app.miescuela.net")
         self.action_sync_sheets = self.menu_sync.addAction("Google Sheets")
         self.action_sync_file = self.menu_sync.addAction("Importar archivo (xlsx/csv)")
+        # Alcance: estas dos SÍ lanzan la sincronización (su texto lo dice).
+        self.menu_sync.addSeparator()
+        self.action_sync_selected = self.menu_sync.addAction("Sincronizar escuela seleccionada")
+        self.action_sync_all = self.menu_sync.addAction("Sincronizar todo")
         self.btn_sync.setMenu(self.menu_sync)
+        self.btn_sync.setToolTip(
+            "Sincroniza la escuela seleccionada (o todo, si no hay ninguna)."
+        )
         
         # El menú SOLO elige el origen; la sincronización la dispara el botón.
         # (Conectar las acciones directamente al handler hacía que con solo
@@ -234,15 +275,58 @@ class MainWindow(QMainWindow):
 
         tb_layout.addWidget(self.btn_sync)
 
-        # Actualizar fotos: limpia el caché de fotos de la escuela y las
-        # re-descarga. Ícono de cámara (alusivo a foto).
-        self.btn_refresh_photos = self._make_toolbar_btn(
-            "fa5s.camera", "Actualizar fotos", primary=False
-        )
+        # Actualizar fotos: limpia el caché de fotos y las re-descarga. El
+        # clic actúa sobre la escuela seleccionada; el menú permite elegir
+        # todas las escuelas. Ícono de cámara (alusivo a foto).
+        self.btn_refresh_photos = self._make_menu_tool_btn("fa5s.camera", "Actualizar fotos")
         self.btn_refresh_photos.setToolTip(
             "Borra del caché las fotos de esta escuela y las vuelve a descargar."
         )
+        self.menu_photos = QMenu(self.btn_refresh_photos)
+        self.action_photos_selected = self.menu_photos.addAction("Escuela seleccionada")
+        self.action_photos_all = self.menu_photos.addAction("Todas las escuelas")
+        self.btn_refresh_photos.setMenu(self.menu_photos)
         tb_layout.addWidget(self.btn_refresh_photos)
+
+        # Reposiciones: carga en la cola todo lo pendiente de reposición de la
+        # escuela seleccionada (credenciales de alumno y tarjetas de
+        # autorizado). El texto lleva el conteo; el menú configura qué
+        # plantilla usa cada tipo de tarjeta.
+        self.btn_reposiciones = QToolButton()
+        self.btn_reposiciones.setText("Reposiciones")
+        self.btn_reposiciones.setIcon(
+            qta.icon(
+                "fa5s.redo-alt",
+                color=COLORS["text"],
+                color_disabled=COLORS["text_light"],
+            )
+        )
+        self.btn_reposiciones.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.btn_reposiciones.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        self.btn_reposiciones.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_reposiciones.setMinimumHeight(40)
+        self.btn_reposiciones.setToolTip(
+            "Carga en la cola las reposiciones pendientes de la escuela seleccionada."
+        )
+        self.btn_reposiciones.setStyleSheet(self._toolbar_btn_style(False).replace("QPushButton", "QToolButton") + """
+            QToolButton::menu-button {
+                border-left: 1px solid #E2E8F0;
+                border-top-right-radius: 8px;
+                border-bottom-right-radius: 8px;
+                width: 28px;
+            }
+            QToolButton::menu-arrow {
+                width: 16px;
+                height: 16px;
+            }
+        """)
+        self.menu_reposiciones = QMenu(self.btn_reposiciones)
+        self.action_repos_plantillas = self.menu_reposiciones.addAction(
+            "Plantillas de reposición…"
+        )
+        self.action_repos_contar = self.menu_reposiciones.addAction("Actualizar conteo")
+        self.btn_reposiciones.setMenu(self.menu_reposiciones)
+        tb_layout.addWidget(self.btn_reposiciones)
 
         tb_layout.addStretch()
         self._toolbar_stack.addWidget(tb_control)
@@ -471,6 +555,31 @@ class MainWindow(QMainWindow):
             QPushButton:hover {{
                 border-color: {c['primary']};
             }}
+        """)
+        return btn
+
+    def _make_menu_tool_btn(self, icon_name: str, text: str) -> QToolButton:
+        """Botón de toolbar con acción principal y menú desplegable al lado."""
+        btn = QToolButton()
+        btn.setText(text)
+        btn.setIcon(
+            qta.icon(icon_name, color=COLORS["text"], color_disabled=COLORS["text_light"])
+        )
+        btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        btn.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        btn.setMinimumHeight(40)
+        btn.setStyleSheet(self._toolbar_btn_style(False).replace("QPushButton", "QToolButton") + """
+            QToolButton::menu-button {
+                border-left: 1px solid #E2E8F0;
+                border-top-right-radius: 8px;
+                border-bottom-right-radius: 8px;
+                width: 28px;
+            }
+            QToolButton::menu-arrow {
+                width: 16px;
+                height: 16px;
+            }
         """)
         return btn
 
