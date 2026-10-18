@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
 from credencializacion.ui.widgets.record_table import RecordTable
 from credencializacion.ui.widgets.print_queue import PrintQueuePanel
 from credencializacion.ui.render_worker import QueueRenderWorker
+from credencializacion.renderer.coordinates import RANURAS_AMBAS
 
 if TYPE_CHECKING:
     from credencializacion.db.models import Registro
@@ -569,11 +570,37 @@ class ControlPanel(QWidget):
         self._lbl_filter_count.setVisible(False)
         row1.addWidget(self._lbl_filter_count)
 
-        # --- Fila 2: Plantilla ---
+        # --- Fila 2: Plantilla + perfil de impresión + ranuras ---
         self._combo_templates = QComboBox()
         self._combo_templates.addItem("Plantillas")
         self._combo_templates.setStyleSheet(combo_style)
         row2.addWidget(self._combo_templates, stretch=1)
+
+        # Perfil de impresión: con cuál calibración de charola se generan los
+        # PDFs de la cola. Arranca sin elegir a propósito — imprimir con la
+        # calibración de otra impresora desperdicia las credenciales.
+        self._combo_perfil = QComboBox()
+        self._combo_perfil.setStyleSheet(combo_style)
+        self._combo_perfil.setToolTip(
+            "Calibración de charola con la que se generarán los PDFs de la cola."
+        )
+        row2.addWidget(self._combo_perfil, stretch=1)
+
+        # Ranura de la charola: por defecto se usan las dos (dos credenciales
+        # por hoja). Elegir una sola imprime una credencial por hoja, en esa
+        # posición, sin tocar el perfil.
+        self._combo_ranuras = QComboBox()
+        self._combo_ranuras.setStyleSheet(combo_style)
+        self._combo_ranuras.addItem("Ambas ranuras", RANURAS_AMBAS)
+        self._combo_ranuras.addItem("Solo ranura 1", "1")
+        self._combo_ranuras.addItem("Solo ranura 2", "2")
+        self._combo_ranuras.setToolTip(
+            "Ranura de la charola donde se imprimirá. La 1 es la más cercana "
+            "al borde de la hoja."
+        )
+        row2.addWidget(self._combo_ranuras)
+
+        self._populate_print_profiles()
 
         filter_bar.addLayout(row1)
         filter_bar.addLayout(row2)
@@ -996,16 +1023,22 @@ class ControlPanel(QWidget):
 
     # ── Render en segundo plano (compartido) ───────────────────────
 
-    def _start_render(self, ids, plantilla_id, out_dir, on_done, autorizados=None) -> None:
+    def _start_render(
+        self, ids, plantilla_id, out_dir, on_done, autorizados=None,
+        perfil=None, ranuras=None,
+    ) -> None:
         """Lanza un ``QueueRenderWorker`` y enruta sus señales.
 
         ``on_done`` se invoca en el hilo principal con (frentes_pdf, vueltas_pdf)
         cuando el render termina correctamente. ``autorizados`` (alineada a
         ``ids``) marca los ítems que son la tarjeta de un autorizado.
+        ``perfil``/``ranuras`` son la calibración de charola: sin perfil se
+        usa la global (vista previa).
         """
         self._render_on_done = on_done
         self._render_worker = QueueRenderWorker(
-            ids, plantilla_id, out_dir, autorizados=autorizados
+            ids, plantilla_id, out_dir, perfil=perfil,
+            autorizados=autorizados, ranuras=ranuras,
         )
         self._render_worker.progress.connect(
             lambda m: self.set_status(m, "info", toast=False)
@@ -1051,6 +1084,7 @@ class ControlPanel(QWidget):
         self._start_render(
             job["ids"], job["plantilla_id"], job["out_dir"], _ok,
             autorizados=job.get("autorizados"),
+            perfil=job.get("perfil"), ranuras=job.get("ranuras"),
         )
 
     @Slot(dict)
@@ -1296,6 +1330,16 @@ class ControlPanel(QWidget):
         if grupos is None:
             return
 
+        # El perfil es obligatorio: generar con la calibración de otra
+        # impresora echa a perder las credenciales ya impresas.
+        perfil_nombre, perfil, ranuras = self._perfil_seleccionado()
+        if perfil_nombre is None:
+            self.set_status(
+                "⚠️ Selecciona un perfil de impresión antes de generar la cola",
+                "warning",
+            )
+            return
+
         registros_unicos = list({reg.id: reg for g in grupos for reg, _ in g["entries"]}.values())
         if not self._confirmar_incidencias(registros_unicos):
             return
@@ -1310,14 +1354,6 @@ class ControlPanel(QWidget):
         from credencializacion.db.models import ColaImpresion, ItemCola
         from credencializacion.services.reposiciones import separar_ids
 
-        # Perfil de posición por defecto para la cola nueva (el primero
-        # disponible). Luego puede regenerarse con otro perfil desde el
-        # Centro de Impresión.
-        from credencializacion.core.settings import AppSettings
-        AppSettings.ensure_default_profile()
-        perfiles = AppSettings.list_position_profiles()
-        perfil_defecto = perfiles[0] if perfiles else None
-
         cola_ids: list[int] = []
         try:
             with DatabaseSession() as session:
@@ -1330,7 +1366,8 @@ class ControlPanel(QWidget):
                     cola = ColaImpresion(
                         nombre=nombre,
                         total_registros=n,
-                        perfil_posicion=perfil_defecto,
+                        perfil_posicion=perfil_nombre,
+                        ranuras=None if ranuras == RANURAS_AMBAS else ranuras,
                     )
                     session.add(cola)
                     session.flush()
@@ -1363,9 +1400,11 @@ class ControlPanel(QWidget):
 
         from credencializacion.utils.paths import get_cola_pdf_dir
 
+        detalle_ranura = "" if ranuras == RANURAS_AMBAS else f", solo ranura {ranuras}"
         self.set_status(
             "📤 Enviando al Centro de Impresión"
-            + (f" ({len(grupos)} colas)..." if len(grupos) > 1 else "..."),
+            + (f" ({len(grupos)} colas)" if len(grupos) > 1 else "")
+            + f" — perfil «{perfil_nombre}»{detalle_ranura}...",
             "info", toast=False,
         )
 
@@ -1392,6 +1431,8 @@ class ControlPanel(QWidget):
                 "plantilla_id": g["plantilla_id"],
                 "out_dir": str(get_cola_pdf_dir(cola_id)),
                 "autorizados": g["autorizados"],
+                "perfil": perfil,
+                "ranuras": ranuras,
                 "on_ok": (lambda f, v, cid=cola_id: self._save_cola_pdfs(cid, f, v)),
             }
             for g, cola_id in zip(grupos, cola_ids)
@@ -2022,6 +2063,37 @@ class ControlPanel(QWidget):
                 f"📋 {self._combo_templates.count() - 1} plantilla(s) disponible(s).",
                 "info",
             )
+
+    def _populate_print_profiles(self) -> None:
+        """Recarga los perfiles de posición, conservando el elegido.
+
+        No preselecciona ninguno: el operador debe elegir con qué impresora
+        va a imprimir antes de generar la cola.
+        """
+        from credencializacion.core.settings import AppSettings
+
+        AppSettings.ensure_default_profile()
+        previo = self._combo_perfil.currentData()
+        self._combo_perfil.blockSignals(True)
+        self._combo_perfil.clear()
+        self._combo_perfil.addItem("Perfil de impresión...", None)
+        for nombre in AppSettings.list_position_profiles():
+            self._combo_perfil.addItem(nombre, nombre)
+        if previo:
+            for i in range(self._combo_perfil.count()):
+                if self._combo_perfil.itemData(i) == previo:
+                    self._combo_perfil.setCurrentIndex(i)
+                    break
+        self._combo_perfil.blockSignals(False)
+
+    def _perfil_seleccionado(self) -> tuple[str | None, dict | None, str]:
+        """``(nombre, perfil, ranuras)`` de lo elegido en la barra de filtros."""
+        from credencializacion.core.settings import AppSettings
+
+        nombre = self._combo_perfil.currentData()
+        perfil = AppSettings.get_position_profile(nombre) if nombre else None
+        ranuras = self._combo_ranuras.currentData() or RANURAS_AMBAS
+        return nombre, perfil, ranuras
 
     def reload_templates(self) -> None:
         """Recarga el combo de plantillas del cliente activo (p. ej. tras

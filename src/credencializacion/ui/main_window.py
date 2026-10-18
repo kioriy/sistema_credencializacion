@@ -429,6 +429,21 @@ class MainWindow(QMainWindow):
         self.cb_print_profile.setMinimumHeight(38)
         tb_pr_layout.addWidget(self.cb_print_profile)
 
+        lbl_ranuras = QLabel("Ranuras:")
+        lbl_ranuras.setStyleSheet(f"color: {COLORS['text']}; font-weight: 600;")
+        tb_pr_layout.addWidget(lbl_ranuras)
+        self.cb_print_ranuras = QComboBox()
+        self.cb_print_ranuras.setMinimumWidth(140)
+        self.cb_print_ranuras.setMinimumHeight(38)
+        self.cb_print_ranuras.addItem("Ambas ranuras", "ambas")
+        self.cb_print_ranuras.addItem("Solo ranura 1", "1")
+        self.cb_print_ranuras.addItem("Solo ranura 2", "2")
+        self.cb_print_ranuras.setToolTip(
+            "Ranura usada al regenerar los PDFs. La 1 es la más cercana al "
+            "borde de la hoja."
+        )
+        tb_pr_layout.addWidget(self.cb_print_ranuras)
+
         lbl_printer = QLabel("Impresora:")
         lbl_printer.setStyleSheet(f"color: {COLORS['text']}; font-weight: 600;")
         tb_pr_layout.addWidget(lbl_printer)
@@ -442,6 +457,7 @@ class MainWindow(QMainWindow):
         # Inyectar referencias en el Centro de Impresión: lee la selección y
         # actualiza el estado de los botones movidos durante el render.
         self._print_center.cb_profile = self.cb_print_profile
+        self._print_center.cb_ranuras = self.cb_print_ranuras
         self._print_center.cb_printer = self.cb_print_printer
         self._print_center._tb_btn_update = self.btn_pr_update
         self._print_center._tb_btn_copy = self.btn_pr_copy
@@ -685,6 +701,11 @@ class MainWindow(QMainWindow):
             self._stack.setCurrentIndex(index)
         if 0 <= index < self._toolbar_stack.count():
             self._toolbar_stack.setCurrentIndex(index)
+
+        # Al volver al Panel de Control, recargar los perfiles (pudieron
+        # crearse o renombrarse en Configuración).
+        if index == 0:
+            self._control_panel._populate_print_profiles()
 
         # Auto-refrescar colas y selectores al navegar al Centro de Impresión.
         if index == 3:

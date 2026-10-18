@@ -97,6 +97,41 @@ def calculate_card_positions_from_config(
     return positions
 
 
+# Valor de "usar las dos ranuras" en los selectores de ranura. La ranura 1 es
+# la más cercana al borde de la hoja; la 2, la siguiente.
+RANURAS_AMBAS = "ambas"
+
+
+def filtrar_por_ranura(
+    positions: list[tuple[float, float]], ranuras: str | None,
+) -> list[tuple[float, float]]:
+    """Deja solo la ranura pedida, o todas si no se pide una.
+
+    Imprimir en una sola ranura es lo que permite usar charolas con una
+    ranura ocupada o dañada: la hoja sale con una credencial en esa posición
+    en vez de dos. Como frentes, vueltas y la composición desde carpeta parten
+    de esta misma lista, el recorte aplica a los tres por igual.
+
+    Args:
+        positions: Posiciones base de cada ranura, en orden (1, 2, …).
+        ranuras: ``"ambas"``/``None`` para todas, o el número de ranura
+            (``"1"``, ``"2"``, o un entero).
+
+    Returns:
+        La lista recortada; si la ranura pedida no existe, se devuelve sin
+        cambios (mejor imprimir en las dos que no imprimir nada).
+    """
+    if ranuras in (None, "", RANURAS_AMBAS):
+        return positions
+    try:
+        indice = int(ranuras) - 1
+    except (TypeError, ValueError):
+        return positions
+    if 0 <= indice < len(positions):
+        return [positions[indice]]
+    return positions
+
+
 def calculate_card_positions_from_profile(
     page_size: tuple[float, float],
     profile: dict,

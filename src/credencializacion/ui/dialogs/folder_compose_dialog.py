@@ -126,6 +126,20 @@ class FolderComposeDialog(QDialog):
             self._combo_perfil.addItem("(configuración global)", "")
         layout.addWidget(self._combo_perfil)
 
+        # ── Ranura de la charola ──
+        lbl_ranuras = QLabel("Ranuras de la charola:")
+        lbl_ranuras.setFont(QFont("Inter", 12, QFont.Weight.DemiBold))
+        layout.addWidget(lbl_ranuras)
+        self._combo_ranuras = QComboBox()
+        self._combo_ranuras.setStyleSheet(input_style)
+        self._combo_ranuras.addItem("Ambas ranuras (2 por hoja)", "")
+        self._combo_ranuras.addItem("Solo ranura 1 (1 por hoja)", "1")
+        self._combo_ranuras.addItem("Solo ranura 2 (1 por hoja)", "2")
+        self._combo_ranuras.setToolTip(
+            "La ranura 1 es la más cercana al borde de la hoja."
+        )
+        layout.addWidget(self._combo_ranuras)
+
         # ── Tamaño / rotación ──
         size_row = QHBoxLayout()
         size_row.addWidget(QLabel("Ancho (cm):"))
@@ -211,6 +225,7 @@ class FolderComposeDialog(QDialog):
                 self._root.name if self._root else "Cola desde carpeta"
             ),
             "perfil_name": self._combo_perfil.currentData() or "",
+            "ranuras": self._combo_ranuras.currentData() or None,
             "card_w_cm": self._sp_w.value(),
             "card_h_cm": self._sp_h.value(),
             "rotate": self._chk_rotate.isChecked(),

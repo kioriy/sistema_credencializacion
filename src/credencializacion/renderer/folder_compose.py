@@ -33,6 +33,7 @@ from credencializacion.renderer.coordinates import (
     mm_to_points,
     calculate_card_positions_from_config,
     calculate_card_positions_from_profile,
+    filtrar_por_ranura,
 )
 
 logger = logging.getLogger(__name__)
@@ -133,7 +134,9 @@ def resolve_folder_sides(root: Path | str) -> FolderSides:
     return FolderSides(fronts, backs, n_front, n_back, "mismatch", warning)
 
 
-def _page_and_positions(perfil: dict | None) -> tuple[tuple[float, float], list]:
+def _page_and_positions(
+    perfil: dict | None, ranuras: str | None = None,
+) -> tuple[tuple[float, float], list]:
     """Tamaño de página (pts) y posiciones base de cada ranura (pts).
 
     Replica exactamente lo que hace ``PDFEngine.__init__`` para que las
@@ -150,7 +153,7 @@ def _page_and_positions(perfil: dict | None) -> tuple[tuple[float, float], list]
         w_mm, h_mm = AppSettings.get_page_dimensions()
         page = (mm_to_points(w_mm), mm_to_points(h_mm))
         positions = calculate_card_positions_from_config(page, {})
-    return page, positions
+    return page, filtrar_por_ranura(positions, ranuras or (perfil or {}).get("ranuras"))
 
 
 def _compose_side(
@@ -214,6 +217,7 @@ def compose_from_folder(
     card_h_cm: float = DEFAULT_CARD_H_CM,
     rotate: bool = False,
     perfil: dict | None = None,
+    ranuras: str | None = None,
 ) -> tuple[str, str | None]:
     """Genera los PDFs de frentes y (si hay) vueltas desde una carpeta.
 
@@ -221,16 +225,18 @@ def compose_from_folder(
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    page_size, positions = _page_and_positions(perfil)
+    page_size, positions = _page_and_positions(perfil, ranuras)
+    # Una imagen por ranura disponible: con una sola ranura, una por hoja.
+    por_hoja = max(1, len(positions))
 
     frentes = _compose_side(
         list(sides.fronts), out_dir / "frentes.pdf",
-        page_size, positions, card_w_cm, card_h_cm, rotate,
+        page_size, positions, card_w_cm, card_h_cm, rotate, por_hoja,
     )
     vueltas: Path | None = None
     if sides.backs is not None:
         vueltas = _compose_side(
             list(sides.backs), out_dir / "vueltas.pdf",
-            page_size, positions, card_w_cm, card_h_cm, rotate,
+            page_size, positions, card_w_cm, card_h_cm, rotate, por_hoja,
         )
     return str(frentes), (str(vueltas) if vueltas else None)

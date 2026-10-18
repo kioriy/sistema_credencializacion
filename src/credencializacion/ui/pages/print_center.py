@@ -193,6 +193,7 @@ class PrintCenter(QWidget):
         self._pending_print: tuple = (None, None)
         # Selectores del toolbar (inyectados por MainWindow).
         self.cb_profile = None
+        self.cb_ranuras = None
         self.cb_printer = None
         self._setup_ui()
 
@@ -643,7 +644,10 @@ class PrintCenter(QWidget):
                 self._detail_header.setText(f"📋 {cola.nombre}")
                 estado = cola.estado_label
                 fecha = cola.created_at.strftime("%d/%m/%Y %H:%M") if cola.created_at else ""
+                self._set_ranuras_combo(cola.ranuras)
                 perfil = cola.perfil_posicion or "—"
+                if cola.ranuras:
+                    perfil += f" (solo ranura {cola.ranuras})"
                 self._detail_info.setText(
                     f"🏫 {escuela}  •  Estado: {estado}  •  "
                     f"Registros: {cola.total_registros}  •  "
@@ -896,6 +900,10 @@ class PrintCenter(QWidget):
                 record_ids = [it.registro_id for it in items]
                 autorizados = self._autorizados_de(items)
                 plantilla_id = items[0].plantilla_id
+                # La ranura elegida en el toolbar manda (igual que el perfil)
+                # y queda guardada en la cola.
+                ranuras = self._selected_ranuras()
+                cola.ranuras = ranuras
                 session.commit()
         except Exception as e:
             self.set_status(f"❌ Error al preparar la actualización: {e}", "error")
@@ -905,7 +913,7 @@ class PrintCenter(QWidget):
 
         msg = "✅ PDFs actualizados" + (
             f" con el perfil «{perfil_name}»" if perfil_name else " con la plantilla vigente"
-        )
+        ) + (f", solo ranura {self._selected_ranuras()}" if self._selected_ranuras() else "")
         self.set_status("🔄 Actualizando PDFs de la cola...", "info", toast=False)
         self._start_render(
             record_ids,
@@ -916,6 +924,7 @@ class PrintCenter(QWidget):
             ),
             perfil=perfil,
             autorizados=autorizados,
+            ranuras=ranuras,
         )
 
     def _copy_selected_queue(self) -> None:
@@ -932,6 +941,7 @@ class PrintCenter(QWidget):
             self.set_status("⏳ Ya hay una generación en curso...", "warning", toast=False)
             return
 
+        from credencializacion.core.settings import AppSettings
         from credencializacion.db.engine import DatabaseSession
         from credencializacion.db.models import ColaImpresion, ItemCola, Plantilla
 
@@ -971,6 +981,8 @@ class PrintCenter(QWidget):
                     for it in items
                 ]
                 autorizados = self._autorizados_de(items)
+                perfil_cola = cola.perfil_posicion
+                ranuras_cola = cola.ranuras
         except Exception as e:
             self.set_status(f"❌ Error al leer la cola: {e}", "error")
             return
@@ -988,6 +1000,8 @@ class PrintCenter(QWidget):
                 nueva = ColaImpresion(
                     nombre=nuevo_nombre,
                     total_registros=len(record_ids),
+                    perfil_posicion=perfil_cola,
+                    ranuras=ranuras_cola,
                 )
                 session.add(nueva)
                 session.flush()
@@ -1031,6 +1045,8 @@ class PrintCenter(QWidget):
             str(get_cola_pdf_dir(nueva_id)),
             _on_copy_done,
             autorizados=autorizados,
+            perfil=AppSettings.get_position_profile(perfil_cola) if perfil_cola else None,
+            ranuras=ranuras_cola,
         )
 
     def _compose_from_folder(self) -> None:
@@ -1080,6 +1096,7 @@ class PrintCenter(QWidget):
                     nombre=vals["nombre"],
                     total_registros=sides.n_front,
                     perfil_posicion=perfil_name or None,
+                    ranuras=vals.get("ranuras"),
                 )
                 session.add(cola)
                 session.flush()
@@ -1098,6 +1115,7 @@ class PrintCenter(QWidget):
         worker = FolderComposeWorker(
             sides, str(get_cola_pdf_dir(cola_id)),
             vals["card_w_cm"], vals["card_h_cm"], vals["rotate"], perfil,
+            vals.get("ranuras"),
         )
         self._compose_worker = worker
         self._set_render_buttons_enabled(False)
@@ -1171,7 +1189,8 @@ class PrintCenter(QWidget):
         ]
 
     def _start_render(
-        self, record_ids, plantilla_id, out_dir, on_done, perfil=None, autorizados=None,
+        self, record_ids, plantilla_id, out_dir, on_done, perfil=None,
+        autorizados=None, ranuras=None,
     ) -> None:
         """Lanza un ``QueueRenderWorker`` y enruta sus señales.
 
@@ -1183,7 +1202,8 @@ class PrintCenter(QWidget):
 
         self._render_on_done = on_done
         self._render_worker = QueueRenderWorker(
-            record_ids, plantilla_id, out_dir, perfil=perfil, autorizados=autorizados
+            record_ids, plantilla_id, out_dir, perfil=perfil,
+            autorizados=autorizados, ranuras=ranuras,
         )
         self._render_worker.progress.connect(
             lambda m: self.set_status(m, "info", toast=False)
@@ -1257,6 +1277,25 @@ class PrintCenter(QWidget):
         if cb is None:
             return ""
         return str(cb.currentData() or "")
+
+    def _selected_ranuras(self) -> str | None:
+        """Ranura elegida en el toolbar (``None`` = ambas)."""
+        cb = getattr(self, "cb_ranuras", None)
+        if cb is None:
+            return None
+        valor = cb.currentData()
+        return None if valor in (None, "", "ambas") else str(valor)
+
+    def _set_ranuras_combo(self, valor: str | None) -> None:
+        """Refleja en el toolbar la ranura con la que se generó una cola."""
+        cb = getattr(self, "cb_ranuras", None)
+        if cb is None:
+            return
+        buscado = valor or "ambas"
+        cb.blockSignals(True)
+        idx = cb.findData(buscado)
+        cb.setCurrentIndex(idx if idx >= 0 else 0)
+        cb.blockSignals(False)
 
     def _selected_profile(self) -> dict | None:
         """Dict del perfil de posición elegido en el toolbar, o None."""

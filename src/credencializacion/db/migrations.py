@@ -148,6 +148,7 @@ def _add_cola_pdf_columns(engine) -> None:
         ("pdf_frente_path", "VARCHAR(500)"),
         ("pdf_vuelta_path", "VARCHAR(500)"),
         ("perfil_posicion", "VARCHAR(255)"),
+        ("ranuras", "VARCHAR(10)"),
     )
     faltantes = [(col, tipo) for col, tipo in columnas if col not in existentes]
     if not faltantes:

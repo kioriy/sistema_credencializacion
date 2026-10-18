@@ -36,6 +36,7 @@ class QueueRenderWorker(QThread):
         out_dir: str,
         perfil: dict | None = None,
         autorizados: list[int | None] | None = None,
+        ranuras: str | None = None,
     ) -> None:
         super().__init__()
         self._record_ids = list(record_ids)
@@ -51,6 +52,8 @@ class QueueRenderWorker(QThread):
         # Perfil de posición (calibración por impresora). None = calibración
         # global de QSettings.
         self._perfil = perfil
+        # Ranura única de la charola ("1"/"2") o None/"ambas" para las dos.
+        self._ranuras = ranuras
 
     def run(self) -> None:  # noqa: D401
         try:
@@ -129,7 +132,9 @@ class QueueRenderWorker(QThread):
                         for reg, _ in render_items
                     ]
 
-                engine = PDFEngine(plantilla, perfil=self._perfil)
+                engine = PDFEngine(
+                    plantilla, perfil=self._perfil, ranuras=self._ranuras,
+                )
 
                 self.progress.emit("🖼 Generando PDF de frentes...")
                 frentes_pdf = engine.render_queue(
@@ -262,9 +267,11 @@ class FolderComposeWorker(QThread):
         card_h_cm: float,
         rotate: bool,
         perfil: dict | None = None,
+        ranuras: str | None = None,
     ) -> None:
         super().__init__()
         self._sides = sides
+        self._ranuras = ranuras
         self._out_dir = out_dir
         self._card_w_cm = card_w_cm
         self._card_h_cm = card_h_cm
@@ -283,6 +290,7 @@ class FolderComposeWorker(QThread):
                 card_h_cm=self._card_h_cm,
                 rotate=self._rotate,
                 perfil=self._perfil,
+                ranuras=self._ranuras,
             )
             if vueltas:
                 self.progress.emit("🖼 Componiendo PDF de vueltas...")

@@ -309,6 +309,10 @@ class ColaImpresion(Base):
     perfil_posicion: Mapped[str | None] = mapped_column(
         String(255), nullable=True
     )  # Nombre del perfil de posición con el que se generaron los PDFs
+    # Ranura(s) de la charola usadas al generar los PDFs: None/"ambas" (dos
+    # credenciales por hoja) o "1"/"2" (una por hoja, en esa ranura). Se
+    # guarda para que regenerar la cola respete lo elegido.
+    ranuras: Mapped[str | None] = mapped_column(String(10), nullable=True)
     total_registros: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0
     )

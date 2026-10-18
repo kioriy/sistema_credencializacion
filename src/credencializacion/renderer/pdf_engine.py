@@ -101,13 +101,24 @@ class PDFEngine:
         perfil: Perfil de posición opcional (dict con ``slot*``/``page_*``).
             Si se indica, la charola usa esa calibración (por impresora); si
             es ``None``, se usa la calibración global de QSettings.
+        ranuras: ``"1"`` o ``"2"`` para imprimir en una sola ranura de la
+            charola (una credencial por hoja); ``None``/``"ambas"`` usa las
+            dos, como siempre.
     """
 
-    def __init__(self, plantilla: "Plantilla", perfil: dict | None = None) -> None:
+    def __init__(
+        self,
+        plantilla: "Plantilla",
+        perfil: dict | None = None,
+        ranuras: str | None = None,
+    ) -> None:
         self.plantilla = plantilla
 
         from credencializacion.core.settings import AppSettings
-        from credencializacion.renderer.coordinates import mm_to_points
+        from credencializacion.renderer.coordinates import (
+            filtrar_por_ranura,
+            mm_to_points,
+        )
 
         self._cards_per_page = (plantilla.posiciones_hoja or {}).get(
             "cards_per_page", 2
@@ -126,6 +137,15 @@ class PDFEngine:
                 self._page_size,
                 plantilla.posiciones_hoja or {},
             )
+        # Recorte a una sola ranura. Después, las tarjetas por hoja no pueden
+        # superar las ranuras disponibles: con el 2 fijo, la segunda tarjeta de
+        # cada par se perdería sin dejar rastro.
+        self._card_positions = filtrar_por_ranura(
+            self._card_positions, ranuras or (perfil or {}).get("ranuras"),
+        )
+        self._cards_per_page = max(
+            1, min(self._cards_per_page, len(self._card_positions)),
+        )
         self._rotate = should_rotate(plantilla)
 
     def render(
