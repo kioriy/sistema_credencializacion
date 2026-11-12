@@ -652,20 +652,44 @@ class ControlPanel(QWidget):
             active_bg=TEXT_DARK,
         ))
 
-        # Pendientes: foto y formulario listos pero aún sin imprimir, o sea
-        # las que faltan por imprimir. Va junto a «Todos» porque es el punto
-        # de partida del trabajo diario.
-        self._pill_pendientes = QPushButton("🕒 Pendientes: 0")
-        self._pill_pendientes.setCheckable(True)
-        self._pill_pendientes.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self._pill_pendientes.setToolTip(
-            "Alumnos con foto y formulario listos cuya credencial todavía no "
-            "se manda a imprimir."
+        # Etapas del ciclo de vida (credential_status), que es lo que no se
+        # tapa: en las escuelas que no exigen formulario, el estatus visible
+        # dice "sin formulario" aunque la credencial ya se haya entregado.
+        self._pill_por_imprimir = QPushButton("🖨 Por imprimir: 0")
+        self._pill_por_imprimir.setCheckable(True)
+        self._pill_por_imprimir.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._pill_por_imprimir.setToolTip(
+            "Alumnos con foto cuya credencial aún no se manda a imprimir, "
+            "tengan formulario o no."
         )
-        self._pill_pendientes.setStyleSheet(pill_base.format(
+        self._pill_por_imprimir.setStyleSheet(pill_base.format(
             bg="#ECFEFF", fg="#0E7490", border="#A5F3FC",
             hover_border="#0E7490", hover_bg="#CFFAFE",
             active_bg="#0E7490",
+        ))
+
+        self._pill_listas = QPushButton("✅ Listas por entregar: 0")
+        self._pill_listas.setCheckable(True)
+        self._pill_listas.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._pill_listas.setToolTip(
+            "Credenciales ya impresas (o en impresión) que todavía no se "
+            "entregan. Marca también «Por imprimir» para ver todo lo no "
+            "entregado."
+        )
+        self._pill_listas.setStyleSheet(pill_base.format(
+            bg="#F0FDF4", fg="#15803D", border="#BBF7D0",
+            hover_border="#15803D", hover_bg="#DCFCE7",
+            active_bg="#15803D",
+        ))
+
+        self._pill_entregadas = QPushButton("📦 Entregadas: 0")
+        self._pill_entregadas.setCheckable(True)
+        self._pill_entregadas.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._pill_entregadas.setToolTip("Credenciales ya entregadas al alumno.")
+        self._pill_entregadas.setStyleSheet(pill_base.format(
+            bg="#F5F3FF", fg="#6D28D9", border="#DDD6FE",
+            hover_border="#6D28D9", hover_bg="#EDE9FE",
+            active_bg="#6D28D9",
         ))
 
         self._pill_with_photo = QPushButton("📸 Con foto: 0")
@@ -734,8 +758,12 @@ class ControlPanel(QWidget):
         self._pill_incidencias.setVisible(False)  # solo si hay algo que revisar
 
         self._pill_all.clicked.connect(lambda: self._apply_status_filter(None))
-        self._pill_pendientes.clicked.connect(
-            lambda: self._toggle_status_filter("pendiente")
+        self._pill_por_imprimir.clicked.connect(
+            lambda: self._toggle_status_filter("por_imprimir")
+        )
+        self._pill_listas.clicked.connect(lambda: self._toggle_status_filter("listas"))
+        self._pill_entregadas.clicked.connect(
+            lambda: self._toggle_status_filter("entregadas")
         )
         self._pill_with_photo.clicked.connect(lambda: self._toggle_status_filter("con_foto"))
         self._pill_no_photo.clicked.connect(lambda: self._toggle_status_filter("sin_foto"))
@@ -751,7 +779,9 @@ class ControlPanel(QWidget):
         )
 
         row.addWidget(self._pill_all)
-        row.addWidget(self._pill_pendientes)
+        row.addWidget(self._pill_por_imprimir)
+        row.addWidget(self._pill_listas)
+        row.addWidget(self._pill_entregadas)
         row.addWidget(self._pill_with_photo)
         row.addWidget(self._pill_no_photo)
         row.addWidget(self._pill_with_form)
@@ -1883,11 +1913,25 @@ class ControlPanel(QWidget):
         return tiene_formulario(reg)
 
     @staticmethod
-    def _es_pendiente(reg: "Registro") -> bool:
-        """Indica si la credencial está lista para imprimir y aún no se imprime."""
-        from credencializacion.services.estatus import es_pendiente
+    def _es_por_imprimir(reg: "Registro") -> bool:
+        """Indica si falta imprimir la credencial (con foto, con o sin formulario)."""
+        from credencializacion.services.estatus import es_por_imprimir
 
-        return es_pendiente(reg)
+        return es_por_imprimir(reg)
+
+    @staticmethod
+    def _esta_lista(reg: "Registro") -> bool:
+        """Indica si ya se imprimió y todavía no se entrega."""
+        from credencializacion.services.estatus import esta_lista_por_entregar
+
+        return esta_lista_por_entregar(reg)
+
+    @staticmethod
+    def _esta_entregada(reg: "Registro") -> bool:
+        """Indica si la credencial ya se entregó."""
+        from credencializacion.services.estatus import esta_entregada
+
+        return esta_entregada(reg)
 
     def _sibling_groups(self) -> dict[str, list]:
         """Agrupa los registros cargados por familia (``tutor_email``).
@@ -1938,7 +1982,9 @@ class ControlPanel(QWidget):
             return lambda r: has_siblings(r, grupos)
 
         return {
-            "pendiente": self._es_pendiente,
+            "por_imprimir": self._es_por_imprimir,
+            "listas": self._esta_lista,
+            "entregadas": self._esta_entregada,
             "con_foto": self._has_photo,
             "sin_foto": lambda r: not self._has_photo(r),
             "con_formulario": self._has_form,
@@ -1965,7 +2011,9 @@ class ControlPanel(QWidget):
         activos = self._active_status_filters
         self._pill_all.setChecked(not activos)
         for clave, pill in (
-            ("pendiente", self._pill_pendientes),
+            ("por_imprimir", self._pill_por_imprimir),
+            ("listas", self._pill_listas),
+            ("entregadas", self._pill_entregadas),
             ("con_foto", self._pill_with_photo),
             ("sin_foto", self._pill_no_photo),
             ("con_formulario", self._pill_with_form),
@@ -2052,7 +2100,9 @@ class ControlPanel(QWidget):
         """Actualiza las numeralias con los conteos de la data actual."""
         if not hasattr(self, '_all_records') or not self._all_records:
             self._pill_all.setText("📋 Todos: 0")
-            self._pill_pendientes.setText("🕒 Pendientes: 0")
+            self._pill_por_imprimir.setText("🖨 Por imprimir: 0")
+            self._pill_listas.setText("✅ Listas por entregar: 0")
+            self._pill_entregadas.setText("📦 Entregadas: 0")
             self._pill_with_photo.setText("📸 Con foto: 0")
             self._pill_no_photo.setText("📷 Sin foto: 0")
             self._pill_with_form.setText("📝 Con formulario: 0")
@@ -2072,10 +2122,14 @@ class ControlPanel(QWidget):
         grupos = self._sibling_groups()
         with_siblings = sum(1 for r in self._all_records if has_siblings(r, grupos))
 
-        pendientes = sum(1 for r in self._all_records if self._es_pendiente(r))
+        por_imprimir = sum(1 for r in self._all_records if self._es_por_imprimir(r))
+        listas = sum(1 for r in self._all_records if self._esta_lista(r))
+        entregadas = sum(1 for r in self._all_records if self._esta_entregada(r))
 
         self._pill_all.setText(f"📋 Todos: {total}")
-        self._pill_pendientes.setText(f"🕒 Pendientes: {pendientes}")
+        self._pill_por_imprimir.setText(f"🖨 Por imprimir: {por_imprimir}")
+        self._pill_listas.setText(f"✅ Listas por entregar: {listas}")
+        self._pill_entregadas.setText(f"📦 Entregadas: {entregadas}")
         self._pill_with_photo.setText(f"📸 Con foto: {with_photo}")
         self._pill_no_photo.setText(f"📷 Sin foto: {total - with_photo}")
         self._pill_with_form.setText(f"📝 Con formulario: {with_form}")

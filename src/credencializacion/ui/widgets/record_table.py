@@ -125,6 +125,34 @@ class StatusBadge(QLabel):
         """)
 
 
+class StatusCell(QWidget):
+    """Badge de etapa y, debajo, la nota de lo que le falta al registro.
+
+    La nota va en su propio renglón en vez de alargar el badge: la columna
+    mide 130 px y "📦 Entregado · sin formulario" se cortaba justo en la
+    parte que importa.
+    """
+
+    def __init__(self, texto: str, bg: str, fg: str, nota: str = "", parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(1)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        badge = StatusBadge(texto, bg, fg)
+        layout.addWidget(badge, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        if nota:
+            lbl = QLabel(nota)
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl.setStyleSheet(
+                f"color: {TEXT_LIGHT}; font-size: 9px; font-weight: 600; "
+                "background: transparent; border: none;"
+            )
+            layout.addWidget(lbl, alignment=Qt.AlignmentFlag.AlignCenter)
+
+
 class AddToQueueButton(QWidget):
     """Botón de acción para agregar un registro a la cola de impresión."""
 
@@ -429,12 +457,29 @@ class RecordTable(QTableWidget):
                 self._incidencias = {}
 
         self.setSortingEnabled(False)  # Desactivar durante carga
+        # Quitar los widgets de la carga anterior ANTES de cambiar el número
+        # de filas: al encoger la tabla, Qt no los destruye y se quedan vivos
+        # bajo el viewport, pintándose encima de las filas nuevas (una fila
+        # sin nota mostraba la nota de la que ocupaba antes ese lugar).
+        self._clear_cell_widgets()
         self.setRowCount(len(records))
 
         for row, reg in enumerate(records):
             self._registro_ids.append(reg.id)
             self._populate_row(row, reg)
         self.setSortingEnabled(True)
+
+    def _clear_cell_widgets(self) -> None:
+        """Destruye los widgets de celda de todas las filas actuales."""
+        for row in range(self.rowCount()):
+            for col in range(self.columnCount()):
+                widget = self.cellWidget(row, col)
+                if widget is not None:
+                    self.removeCellWidget(row, col)
+                    # Desligarlo del viewport ya: el borrado de Qt es
+                    # diferido y mientras tanto el widget seguiría pintándose.
+                    widget.setParent(None)
+                    widget.deleteLater()
 
     def set_photo_by_id(self, reg_id: int, pixmap: QPixmap) -> None:
         """Asigna una foto circular a la fila que corresponda al ID dado."""
@@ -505,11 +550,15 @@ class RecordTable(QTableWidget):
         group_item.setFont(QFont("Inter", 11))
         self.setItem(row, COL_GRUPO, group_item)
 
-        # Col 7: Estado badge (credential_display_status del endpoint)
-        estado = self._determine_status(reg)
+        # Col 7: Estado badge (etapa real + lo que falte, ver _determine_status)
+        estado, nota = self._determine_status(reg)
         bg, fg = STATUS_COLORS.get(estado, (TEXT_LIGHT, "#FFFFFF"))
-        badge = StatusBadge(self._status_label(estado), bg, fg)
-        self.setCellWidget(row, COL_ESTADO, badge)
+        celda_estado = StatusCell(self._status_label(estado), bg, fg, nota)
+        celda_estado.setToolTip(
+            f"{self._status_label(estado)}"
+            + (f" — la credencial se imprime {nota}." if nota else "")
+        )
+        self.setCellWidget(row, COL_ESTADO, celda_estado)
 
         # Col 8: Botón agregar a cola
         actions = AddToQueueButton(reg.id)
@@ -529,25 +578,29 @@ class RecordTable(QTableWidget):
         # Altura de fila
         self.setRowHeight(row, 56)
 
-    def _determine_status(self, reg: "Registro") -> str:
-        """Determina el estado visual usando `credential_display_status` del API.
+    def _determine_status(self, reg: "Registro") -> tuple[str, str]:
+        """Determina el estado visual y la nota de lo que falte.
 
-        Si el endpoint provee `credential_display_status` se usa tal cual (es la
-        fuente de verdad del backend). Si no, cae al comportamiento previo
-        (falta foto > credential_status > estado_impresion).
+        Mientras la credencial no se imprime manda el
+        `credential_display_status` del API: ahí lo accionable es lo que falta
+        (foto o formulario). En cuanto avanza, ese campo tapa el avance real
+        —sigue diciendo "sin_formulario" aunque ya esté entregada, en las
+        escuelas que no lo exigen—, así que manda la etapa de
+        `credential_status` y lo que falta se muestra como nota al lado.
+
+        Sin ningún dato del API (importaciones), cae al estado local.
         """
+        from credencializacion.services.estatus import estado_visible
+
         display = (reg.get_dato("credential_display_status", "") or "").strip()
-        if display:
-            return display
+        if display or reg.credential_status:
+            return estado_visible(reg)
+
         if not reg.photo_path:
-            return "sin_foto"
-        if reg.credential_status == "replacement_requested":
-            return "replacement_requested"
-        if reg.credential_status == "ready":
-            return "ready"
+            return "sin_foto", ""
         if reg.estado_impresion and reg.estado_impresion != "pendiente":
-            return reg.estado_impresion
-        return "pendiente"
+            return reg.estado_impresion, ""
+        return "pendiente", ""
 
     def _status_label(self, estado: str) -> str:
         """Convierte un estado interno al texto visible en español."""
