@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QDialog,
 )
 
+from credencializacion.ui.widgets.flow_layout import FlowLayout
 from credencializacion.ui.widgets.record_table import RecordTable
 from credencializacion.ui.widgets.print_queue import PrintQueuePanel
 from credencializacion.ui.render_worker import QueueRenderWorker
@@ -322,7 +323,9 @@ class ControlPanel(QWidget):
         super().__init__(parent)
         self._all_records: list["Registro"] = []
         self._filtered_records: list[dict] | None = None  # None = sin filtro
-        self._active_status_filter: str | None = None
+        # Filtros de estatus activos. Los de estatus se suman entre sí;
+        # «Hermanos»/«Incidencias» van solos (ver services.estatus).
+        self._active_status_filters: set[str] = set()
         self._current_page = 0
         self._total_records = 0
         # Network manager para descargar fotos async
@@ -607,11 +610,14 @@ class ControlPanel(QWidget):
 
         return filter_bar
 
-    def _build_status_counters(self) -> QHBoxLayout:
-        """Construye la fila de numeralias/contadores de estado clickeables."""
-        row = QHBoxLayout()
-        row.setSpacing(8)
-        row.setContentsMargins(0, 0, 0, 0)
+    def _build_status_counters(self) -> "FlowLayout":
+        """Construye la fila de numeralias/contadores de estado clickeables.
+
+        Envuelve en varios renglones: el panel comparte el ancho con la cola
+        de impresión y en una sola línea las pills se cortan justo donde está
+        el número.
+        """
+        row = FlowLayout(spacing=8)
 
         pill_base = """
             QPushButton {{
@@ -644,6 +650,22 @@ class ControlPanel(QWidget):
             bg=MAIN_BG, fg=TEXT_DARK, border=BORDER,
             hover_border=PRIMARY, hover_bg="#FEE2E2",
             active_bg=TEXT_DARK,
+        ))
+
+        # Pendientes: foto y formulario listos pero aún sin imprimir, o sea
+        # las que faltan por imprimir. Va junto a «Todos» porque es el punto
+        # de partida del trabajo diario.
+        self._pill_pendientes = QPushButton("🕒 Pendientes: 0")
+        self._pill_pendientes.setCheckable(True)
+        self._pill_pendientes.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._pill_pendientes.setToolTip(
+            "Alumnos con foto y formulario listos cuya credencial todavía no "
+            "se manda a imprimir."
+        )
+        self._pill_pendientes.setStyleSheet(pill_base.format(
+            bg="#ECFEFF", fg="#0E7490", border="#A5F3FC",
+            hover_border="#0E7490", hover_bg="#CFFAFE",
+            active_bg="#0E7490",
         ))
 
         self._pill_with_photo = QPushButton("📸 Con foto: 0")
@@ -712,23 +734,30 @@ class ControlPanel(QWidget):
         self._pill_incidencias.setVisible(False)  # solo si hay algo que revisar
 
         self._pill_all.clicked.connect(lambda: self._apply_status_filter(None))
-        self._pill_with_photo.clicked.connect(lambda: self._apply_status_filter("con_foto"))
-        self._pill_no_photo.clicked.connect(lambda: self._apply_status_filter("sin_foto"))
-        self._pill_with_form.clicked.connect(lambda: self._apply_status_filter("con_formulario"))
-        self._pill_no_form.clicked.connect(lambda: self._apply_status_filter("sin_formulario"))
-        self._pill_siblings.clicked.connect(lambda: self._apply_status_filter("hermanos"))
+        self._pill_pendientes.clicked.connect(
+            lambda: self._toggle_status_filter("pendiente")
+        )
+        self._pill_with_photo.clicked.connect(lambda: self._toggle_status_filter("con_foto"))
+        self._pill_no_photo.clicked.connect(lambda: self._toggle_status_filter("sin_foto"))
+        self._pill_with_form.clicked.connect(
+            lambda: self._toggle_status_filter("con_formulario")
+        )
+        self._pill_no_form.clicked.connect(
+            lambda: self._toggle_status_filter("sin_formulario")
+        )
+        self._pill_siblings.clicked.connect(lambda: self._toggle_status_filter("hermanos"))
         self._pill_incidencias.clicked.connect(
-            lambda: self._apply_status_filter("incidencias")
+            lambda: self._toggle_status_filter("incidencias")
         )
 
         row.addWidget(self._pill_all)
+        row.addWidget(self._pill_pendientes)
         row.addWidget(self._pill_with_photo)
         row.addWidget(self._pill_no_photo)
         row.addWidget(self._pill_with_form)
         row.addWidget(self._pill_no_form)
         row.addWidget(self._pill_siblings)
         row.addWidget(self._pill_incidencias)
-        row.addStretch()
 
         return row
 
@@ -830,7 +859,7 @@ class ControlPanel(QWidget):
         """
         self._all_records = records
         self._filtered_records = None
-        self._active_status_filter = None
+        self._active_status_filters = set()
         self._total_records = len(records)
         self._current_page = 1
         # Las incidencias se calculan una sola vez sobre el padrón completo,
@@ -1848,17 +1877,17 @@ class ControlPanel(QWidget):
 
     @staticmethod
     def _has_form(reg: "Registro") -> bool:
-        """Indica si el alumno completó su formulario (``form_status`` del API).
+        """Indica si el alumno completó su formulario (``form_status`` del API)."""
+        from credencializacion.services.estatus import tiene_formulario
 
-        Si el registro no trae el campo (sincronizaciones viejas), se infiere
-        del ``credential_display_status``: el backend reporta "sin_formulario"
-        con prioridad sobre cualquier otro estado.
-        """
-        val = reg.get_dato("form_status", None)
-        if val is not None:
-            return bool(val)
-        display = (reg.get_dato("credential_display_status", "") or "").strip()
-        return display != "sin_formulario"
+        return tiene_formulario(reg)
+
+    @staticmethod
+    def _es_pendiente(reg: "Registro") -> bool:
+        """Indica si la credencial está lista para imprimir y aún no se imprime."""
+        from credencializacion.services.estatus import es_pendiente
+
+        return es_pendiente(reg)
 
     def _sibling_groups(self) -> dict[str, list]:
         """Agrupa los registros cargados por familia (``tutor_email``).
@@ -1909,6 +1938,7 @@ class ControlPanel(QWidget):
             return lambda r: has_siblings(r, grupos)
 
         return {
+            "pendiente": self._es_pendiente,
             "con_foto": self._has_photo,
             "sin_foto": lambda r: not self._has_photo(r),
             "con_formulario": self._has_form,
@@ -1916,18 +1946,34 @@ class ControlPanel(QWidget):
             "incidencias": self._tiene_incidencias,
         }.get(status)
 
-    def _apply_status_filter(self, status: str | None) -> None:
-        """Aplica un filtro de estado y actualiza las pills."""
-        self._active_status_filter = status
-        # Actualizar estado checked de las pills
-        self._pill_all.setChecked(status is None)
-        self._pill_with_photo.setChecked(status == "con_foto")
-        self._pill_no_photo.setChecked(status == "sin_foto")
-        self._pill_with_form.setChecked(status == "con_formulario")
-        self._pill_no_form.setChecked(status == "sin_formulario")
-        self._pill_siblings.setChecked(status == "hermanos")
-        self._pill_incidencias.setChecked(status == "incidencias")
+    def _toggle_status_filter(self, status: str) -> None:
+        """Marca o desmarca una pill, respetando las reglas de mezcla."""
+        from credencializacion.services.estatus import alternar
+
+        self._active_status_filters = alternar(self._active_status_filters, status)
+        self._sync_status_pills()
         self._apply_filters()
+
+    def _apply_status_filter(self, status: str | None) -> None:
+        """Deja activo únicamente el filtro indicado (``None`` = Todos)."""
+        self._active_status_filters = {status} if status else set()
+        self._sync_status_pills()
+        self._apply_filters()
+
+    def _sync_status_pills(self) -> None:
+        """Refleja en las pills los filtros activos."""
+        activos = self._active_status_filters
+        self._pill_all.setChecked(not activos)
+        for clave, pill in (
+            ("pendiente", self._pill_pendientes),
+            ("con_foto", self._pill_with_photo),
+            ("sin_foto", self._pill_no_photo),
+            ("con_formulario", self._pill_with_form),
+            ("sin_formulario", self._pill_no_form),
+            ("hermanos", self._pill_siblings),
+            ("incidencias", self._pill_incidencias),
+        ):
+            pill.setChecked(clave in activos)
 
     def _apply_filters(self) -> None:
         """Aplica búsqueda de texto + filtro de estado combinados.
@@ -1941,12 +1987,18 @@ class ControlPanel(QWidget):
 
         records = list(self._all_records)
 
-        # Filtro de estado (pills): foto/formulario según los datos del registro.
-        status = self._active_status_filter
-        if status:
-            pred = self._status_filter_predicate(status)
-            if pred is not None:
-                records = [r for r in records if pred(r)]
+        # Filtro de estado (pills). Varias pills de estatus se SUMAN: marcar
+        # «Pendientes» y «Sin formulario» muestra los dos grupos, que es como
+        # se arma la tanda de impresión (las rezagadas y las que van solo con
+        # el QR). «Hermanos»/«Incidencias» nunca llegan acompañadas.
+        activos = self._active_status_filters
+        if activos:
+            predicados = [
+                p for p in (self._status_filter_predicate(c) for c in activos)
+                if p is not None
+            ]
+            if predicados:
+                records = [r for r in records if any(p(r) for p in predicados)]
 
         # Filtro de texto
         query = self._search_input.text().strip().lower()
@@ -1986,7 +2038,7 @@ class ControlPanel(QWidget):
                     return query in searchable
                 records = [r for r in records if matches(r)]
 
-        if not self._active_status_filter and not query:
+        if not self._active_status_filters and not query:
             self._filtered_records = None
             self._lbl_filter_count.setVisible(False)
         else:
@@ -2000,6 +2052,7 @@ class ControlPanel(QWidget):
         """Actualiza las numeralias con los conteos de la data actual."""
         if not hasattr(self, '_all_records') or not self._all_records:
             self._pill_all.setText("📋 Todos: 0")
+            self._pill_pendientes.setText("🕒 Pendientes: 0")
             self._pill_with_photo.setText("📸 Con foto: 0")
             self._pill_no_photo.setText("📷 Sin foto: 0")
             self._pill_with_form.setText("📝 Con formulario: 0")
@@ -2019,7 +2072,10 @@ class ControlPanel(QWidget):
         grupos = self._sibling_groups()
         with_siblings = sum(1 for r in self._all_records if has_siblings(r, grupos))
 
+        pendientes = sum(1 for r in self._all_records if self._es_pendiente(r))
+
         self._pill_all.setText(f"📋 Todos: {total}")
+        self._pill_pendientes.setText(f"🕒 Pendientes: {pendientes}")
         self._pill_with_photo.setText(f"📸 Con foto: {with_photo}")
         self._pill_no_photo.setText(f"📷 Sin foto: {total - with_photo}")
         self._pill_with_form.setText(f"📝 Con formulario: {with_form}")
@@ -2031,7 +2087,7 @@ class ControlPanel(QWidget):
         con_incidencias = len(self._incidencias())
         self._pill_incidencias.setText(f"⚠ Incidencias: {con_incidencias}")
         self._pill_incidencias.setVisible(con_incidencias > 0)
-        if not con_incidencias and self._active_status_filter == "incidencias":
+        if not con_incidencias and "incidencias" in self._active_status_filters:
             self._apply_status_filter(None)
 
     def _load_client_templates(self, cliente_id: int) -> None:
