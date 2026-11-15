@@ -61,7 +61,15 @@ class GraphicElement(QGraphicsItem):
         self.prepareGeometryChange()
         self.setPos(x, y)
         self._rect = QRectF(0, 0, w, h)
-        
+
+        # Rotación del elemento, alrededor de su centro (es lo que espera
+        # quien arrastra: el elemento gira en su lugar, no se va de la
+        # tarjeta). El mismo ángulo y el mismo centro usa el motor de PDF.
+        from credencializacion.renderer.rotation import element_rotation
+
+        self.setTransformOriginPoint(self._rect.center())
+        self.setRotation(element_rotation(self._data))
+
         self.setZValue(self._data.get("z_order", 1))
         self.update()
 
@@ -330,25 +338,75 @@ class GraphicElement(QGraphicsItem):
         painter.drawRect(self._rect)
 
 
+    def visual_offset(self) -> tuple[float, float, float, float]:
+        """Caja que ocupa el elemento ya girado, en px: ``(dx, dy, w, h)``.
+
+        ``dx``/``dy`` es cuánto se corre su esquina respecto a la posición
+        guardada. Con el elemento derecho es ``(0, 0, ancho, alto)``.
+        """
+        from credencializacion.renderer.rotation import rotated_bounds
+
+        return rotated_bounds(
+            self._rect.width(), self._rect.height(), self.rotation(),
+        )
+
     def itemChange(self, change, value):
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionChange and self.scene():
-            # Limitar al scene rect
+            # Limitar al scene rect. Se usa la caja YA GIRADA: con la caja sin
+            # girar, un texto acostado puesto de pie seguía topando como si
+            # fuera ancho y no llegaba al borde de la tarjeta.
+            from credencializacion.renderer.rotation import clamp_position
+
             rect = self.scene().sceneRect()
             new_pos = value
-            if not rect.contains(new_pos):
-                new_pos.setX(min(rect.right() - self._rect.width(), max(new_pos.x(), rect.left())))
-                new_pos.setY(min(rect.bottom() - self._rect.height(), max(new_pos.y(), rect.top())))
+            x, y = clamp_position(
+                new_pos.x() - rect.left(), new_pos.y() - rect.top(),
+                self._rect.width(), self._rect.height(), self.rotation(),
+                rect.width(), rect.height(),
+            )
+            x += rect.left()
+            y += rect.top()
+            if (x, y) != (new_pos.x(), new_pos.y()):
+                new_pos.setX(x)
+                new_pos.setY(y)
                 return new_pos
+        elif change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged:
+            # Avisar para que el panel de propiedades siga la posición
+            # mientras se arrastra (antes solo se enteraba al reseleccionar).
+            escena = self.scene()
+            if escena is not None and hasattr(escena, "item_moved"):
+                escena.item_moved.emit(self)
         return super().itemChange(change, value)
 
 
 class CredentialScene(QGraphicsScene):
     """Escena que maneja el drag & drop y eventos del lienzo."""
     
-    item_updated = Signal(object) # dict del elemento
+    item_updated = Signal(object)  # dict del elemento
+    item_moved = Signal(object)  # GraphicElement que acaba de moverse
 
     def __init__(self, parent=None):
         super().__init__(parent)
+
+    def mousePressEvent(self, event):
+        """Alt + clic agrega o quita un elemento de la selección.
+
+        Sin Alt se conserva el comportamiento de siempre (un clic selecciona
+        uno solo). Con Alt no se limpia lo ya seleccionado y el elemento bajo
+        el cursor se alterna, así la misma tecla sirve para sumar y para
+        quitar.
+        """
+        if event.modifiers() & Qt.KeyboardModifier.AltModifier:
+            vista = self.views()[0] if self.views() else None
+            transform = vista.transform() if vista is not None else QTransform()
+            item = self.itemAt(event.scenePos(), transform)
+            while item is not None and not isinstance(item, GraphicElement):
+                item = item.parentItem()
+            if item is not None:
+                item.setSelected(not item.isSelected())
+                event.accept()
+                return
+        super().mousePressEvent(event)
 
     def set_physical_size(self, width_cm: float, height_cm: float):
         """Ajusta el tamaño del lienzo basado en cm."""
@@ -441,6 +499,22 @@ class CredentialView(QGraphicsView):
         from PySide6.QtWidgets import QSizePolicy
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
+        # Al cambiar de orientación (o al cargar una plantilla de otro tamaño)
+        # el lienzo cambia de forma sin que la vista cambie de tamaño: hay que
+        # reencuadrar ahí mismo. Sin esto el lienzo vertical se dibujaba con la
+        # escala del horizontal y se le recortaban los bordes de arriba y
+        # abajo hasta que algo redimensionaba la ventana.
+        scene.sceneRectChanged.connect(self._on_scene_rect_changed)
+
+    def _on_scene_rect_changed(self, _rect: QRectF) -> None:
+        self.fit_to_scene()
+
+    def fit_to_scene(self) -> None:
+        """Encuadra el lienzo completo en la vista, sin deformarlo."""
+        sr = self.sceneRect()
+        if sr.width() > 0 and sr.height() > 0:
+            self.fitInView(sr, Qt.AspectRatioMode.KeepAspectRatio)
+
     def drawBackground(self, painter: QPainter, rect: QRectF):
         # Dibujar fondo blanco del lienzo
         scene_rect = self.sceneRect()
@@ -453,16 +527,12 @@ class CredentialView(QGraphicsView):
     def resizeEvent(self, event):
         """Ajusta la escena para que quepa completa en la vista sin scroll."""
         super().resizeEvent(event)
-        sr = self.sceneRect()
-        if sr.width() > 0 and sr.height() > 0:
-            self.fitInView(sr, Qt.AspectRatioMode.KeepAspectRatio)
+        self.fit_to_scene()
 
     def showEvent(self, event):
         """Ajusta al mostrarse por primera vez."""
         super().showEvent(event)
-        sr = self.sceneRect()
-        if sr.width() > 0 and sr.height() > 0:
-            self.fitInView(sr, Qt.AspectRatioMode.KeepAspectRatio)
+        self.fit_to_scene()
 
     def set_zoom(self, level_percent: int):
         self.resetTransform()

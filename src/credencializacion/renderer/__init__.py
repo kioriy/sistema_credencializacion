@@ -15,6 +15,10 @@ from credencializacion.renderer.pdf_engine import PDFEngine
 from credencializacion.renderer.print_manager import PrintManager
 from credencializacion.renderer.rotation import (
     apply_rotation,
+    clamp_position,
+    element_bounds,
+    element_rotation,
+    rotated_bounds,
     restore_rotation,
     should_rotate,
     get_rotated_dimensions,
@@ -30,6 +34,10 @@ __all__ = [
     "calculate_card_positions_from_profile",
     "final_coordinate",
     "apply_rotation",
+    "clamp_position",
+    "element_bounds",
+    "element_rotation",
+    "rotated_bounds",
     "restore_rotation",
     "should_rotate",
     "get_rotated_dimensions",

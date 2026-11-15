@@ -549,6 +549,22 @@ class PropertiesPanel(QWidget):
         )
         self._form.addRow("Alto:", self._spin_h)
 
+        # Rotación (grados, en sentido de las manecillas como en el lienzo)
+        self._spin_rotation = QDoubleSpinBox()
+        self._spin_rotation.setSuffix(" °")
+        self._spin_rotation.setRange(-180, 180)
+        self._spin_rotation.setDecimals(1)
+        self._spin_rotation.setSingleStep(5)
+        self._spin_rotation.setToolTip(
+            "Gira el elemento sobre su centro. Positivo = sentido de las "
+            "manecillas del reloj."
+        )
+        self._spin_rotation.setStyleSheet(self._input_style())
+        self._spin_rotation.valueChanged.connect(
+            lambda v: self.property_changed.emit("rotation", v)
+        )
+        self._form.addRow("Rotación:", self._spin_rotation)
+
         # Fuente
         self._combo_font = QComboBox()
         db = QFontDatabase()
@@ -848,11 +864,15 @@ class PropertiesPanel(QWidget):
             }}
         """
 
-    def update_properties(self, element: dict | None) -> None:
+    def update_properties(self, element: dict | None, seleccionados: int = 1) -> None:
         """Actualiza el panel con las propiedades del elemento seleccionado.
 
         Args:
             element: Dict del elemento o None si se deseleccionó.
+            seleccionados: Cuántos elementos hay marcados. Con más de uno se
+                siguen mostrando las propiedades del primero, pero se avisa
+                —si no, parecería que las acciones de la barra aplican solo a
+                ese y no a todos.
         """
         if element is None:
             self._lbl_empty.setVisible(True)
@@ -867,7 +887,10 @@ class PropertiesPanel(QWidget):
         props = element.get("properties", {})
         elem_type = element.get("type", "unknown")
         
-        self._lbl_element_type.setText(elem_type.upper())
+        self._lbl_element_type.setText(
+            elem_type.upper() if seleccionados <= 1
+            else f"{elem_type.upper()} · {seleccionados} seleccionados"
+        )
 
         # Ocultar paneles específicos primero
         self._w_dynamic_group.setVisible(False)
@@ -899,6 +922,7 @@ class PropertiesPanel(QWidget):
 
         # Bloquear señales
         for widget in (self._spin_x, self._spin_y, self._spin_w, self._spin_h,
+                       self._spin_rotation,
                        self._combo_font, self._spin_font_size, self._chk_bold,
                        self._combo_render_as, self._chk_qr_bg,
                        self._combo_barcode_format, self._edit_test_text, self._edit_composite,
@@ -921,10 +945,25 @@ class PropertiesPanel(QWidget):
             _i = self._combo_sibling.findData(_n)
             self._combo_sibling.setCurrentIndex(_i if _i >= 0 else 0)
 
-        self._spin_x.setValue(element.get("x", 0))
-        self._spin_y.setValue(element.get("y", 0))
+        # X/Y son los de la caja YA GIRADA: es la posición que se ve, así que
+        # «X: 0» deja el elemento pegado al borde izquierdo esté girado o no.
+        # El dict guarda la caja sin girar; la conversión de vuelta la hace
+        # `_on_property_changed`.
+        from credencializacion.renderer.rotation import element_bounds
+
+        vis_x, vis_y, _vw, _vh = element_bounds(element)
+        self._spin_x.setValue(vis_x)
+        self._spin_y.setValue(vis_y)
         self._spin_w.setValue(element.get("width", 0))
         self._spin_h.setValue(element.get("height", 0))
+
+        # La imagen base ocupa toda la tarjeta: girarla no sería rotar un
+        # elemento sino el diseño entero (eso lo decide la orientación).
+        from credencializacion.renderer.rotation import element_rotation
+
+        gira = elem_type not in ("base_image", "background")
+        self._form.setRowVisible(self._spin_rotation, gira)
+        self._spin_rotation.setValue(element_rotation(element) if gira else 0.0)
 
         if elem_type in ("text", "composite"):
             self._w_dynamic_group.setVisible(True)
@@ -1020,6 +1059,7 @@ class PropertiesPanel(QWidget):
             self._f_dyn.setRowVisible(self._spin_circle_radius, is_circ)
 
         for widget in (self._spin_x, self._spin_y, self._spin_w, self._spin_h,
+                       self._spin_rotation,
                        self._combo_font, self._spin_font_size, self._chk_bold,
                        self._combo_render_as, self._chk_qr_bg,
                        self._combo_barcode_format, self._edit_test_text, self._edit_composite,
@@ -1389,6 +1429,7 @@ class TemplateEditor(QWidget):
         self._scene_frente.set_physical_size(8.5, 5.4) # default horizontal
         self._scene_frente.item_updated.connect(self._on_item_updated)
         self._scene_frente.selectionChanged.connect(self._on_scene_selection_changed)
+        self._scene_frente.item_moved.connect(self._on_item_moved)
         
         self._view_frente = CredentialView(self._scene_frente)
         self._view_frente.setMinimumHeight(320)
@@ -1397,6 +1438,7 @@ class TemplateEditor(QWidget):
         self._scene_vuelta.set_physical_size(8.5, 5.4)
         self._scene_vuelta.item_updated.connect(self._on_item_updated)
         self._scene_vuelta.selectionChanged.connect(self._on_scene_selection_changed)
+        self._scene_vuelta.item_moved.connect(self._on_item_moved)
         
         self._view_vuelta = CredentialView(self._scene_vuelta)
         self._view_vuelta.setMinimumHeight(320)
@@ -2470,7 +2512,9 @@ class TemplateEditor(QWidget):
         selected = scene.selectedItems()
         if selected:
             # selected[0] es GraphicElement
-            self._properties_panel.update_properties(selected[0].get_data())
+            self._properties_panel.update_properties(
+                selected[0].get_data(), len(selected)
+            )
         else:
             self._properties_panel.update_properties(None)
             
@@ -2503,7 +2547,18 @@ class TemplateEditor(QWidget):
             
         item = selected[0]
         data = item.get_data()
-        
+
+        # El panel trabaja con la posición visible (la de la caja girada) y el
+        # dict guarda la caja sin girar: se descuenta el corrimiento del giro.
+        if key in ("x", "y"):
+            from credencializacion.renderer.rotation import rotated_bounds
+
+            dx, dy, _w, _h = rotated_bounds(
+                data.get("width", 0), data.get("height", 0),
+                (data.get("properties") or {}).get("rotation", 0) or 0,
+            )
+            value = round(value - (dx if key == "x" else dy), 4)
+
         # Ignorar si no hay cambio real
         if data.get(key) == value or data.get("properties", {}).get(key) == value:
             return
@@ -2520,39 +2575,155 @@ class TemplateEditor(QWidget):
             
         item.set_data(data)
         
-        if key == "is_static":
+        # Al girar cambia la caja visible, así que X/Y del panel se recalculan.
+        if key in ("is_static", "rotation"):
             self._properties_panel.update_properties(item.get_data())
-    def align_selected(self, alignment: str) -> None:
-        """Alinea el elemento seleccionado en el lienzo actual."""
+    def _on_item_moved(self, item) -> None:
+        """Refleja en el panel la posición del elemento que se está moviendo.
+
+        Solo con un elemento seleccionado: moviendo varios a la vez, el panel
+        muestra el primero y actualizarlo en cada paso confundiría más que
+        ayudar.
+        """
+        scene = item.scene()
+        if scene is None or len(scene.selectedItems()) != 1:
+            return
+        if not item.isSelected():
+            return
+        self._properties_panel.update_properties(item.get_data())
+
+    def distribute_selected(self, modo: str) -> None:
+        """Reparte los elementos seleccionados entre sí.
+
+        Trabaja con la caja que cada uno ocupa ya girado y deja quietos a los
+        de los extremos: se mueve solo lo de en medio.
+        """
+        from credencializacion.renderer.rotation import element_bounds, rotated_bounds
+        from credencializacion.services.distribucion import (
+            HORIZONTAL_ESPACIO,
+            MINIMO_ELEMENTOS,
+            VERTICAL_ESPACIO,
+            distribuir,
+        )
+
         scene = self._scene_frente if self._current_side == "frente" else self._scene_vuelta
-        selected = scene.selectedItems()
+        seleccionados = [i for i in scene.selectedItems() if hasattr(i, "get_data")]
+        if len(seleccionados) < MINIMO_ELEMENTOS:
+            self.set_status(
+                f"⚠️ Selecciona al menos {MINIMO_ELEMENTOS} elementos para "
+                "distribuirlos (Alt + clic para ir sumando).",
+                "warning",
+            )
+            return
+
+        datos = [i.get_data() for i in seleccionados]
+        cajas = [element_bounds(d) for d in datos]
+        limite = (
+            scene.sceneRect().width() / MM_TO_PX,
+            scene.sceneRect().height() / MM_TO_PX,
+        )
+        posiciones = distribuir(cajas, modo, limite)
+
+        # Si no hay nada que mover conviene decirlo: un botón que no hace
+        # nada se siente roto, y con dos elementos el espaciado igual no
+        # tiene hueco intermedio que repartir.
+        if all(
+            abs(nx - caja[0]) < 1e-6 and abs(ny - caja[1]) < 1e-6
+            for (nx, ny), caja in zip(posiciones, cajas)
+        ):
+            if len(seleccionados) == 2 and modo in (HORIZONTAL_ESPACIO, VERTICAL_ESPACIO):
+                self.set_status(
+                    "ℹ️ Con dos elementos el espaciado igual no tiene qué "
+                    "repartir: usa «centros equidistantes» para ponerlos en "
+                    "fila o en columna.",
+                    "info",
+                )
+            else:
+                self.set_status(
+                    "ℹ️ Los elementos ya estaban distribuidos así: "
+                    "nada que mover.",
+                    "info",
+                )
+            return
+
+        self._push_undo_state()
+
+        for item, data, (vis_x, vis_y) in zip(seleccionados, datos, posiciones):
+            # Las posiciones que devuelve son las de la caja visible; el dict
+            # guarda la caja sin girar.
+            dx, dy, _w, _h = rotated_bounds(
+                data.get("width", 0), data.get("height", 0),
+                (data.get("properties") or {}).get("rotation", 0) or 0,
+            )
+            data["x"] = round(vis_x - dx, 4)
+            data["y"] = round(vis_y - dy, 4)
+            item.set_data(data)
+
+        etiquetas = {
+            "horizontal_centros": "centros equidistantes en horizontal",
+            "vertical_centros": "centros equidistantes en vertical",
+            "horizontal_espacio": "espaciado horizontal igual",
+            "vertical_espacio": "espaciado vertical igual",
+        }
+        self.set_status(
+            f"✅ {len(seleccionados)} elementos distribuidos: "
+            f"{etiquetas.get(modo, modo)}.",
+            "success",
+        )
+        if len(seleccionados) == 1:
+            self._properties_panel.update_properties(seleccionados[0].get_data())
+
+    def align_selected(self, alignment: str) -> None:
+        """Alinea contra el lienzo TODOS los elementos seleccionados.
+
+        Con varios marcados (Alt + clic) cada uno se pega al mismo borde de la
+        tarjeta, no unos respecto de otros.
+        """
+        scene = self._scene_frente if self._current_side == "frente" else self._scene_vuelta
+        selected = [i for i in scene.selectedItems() if hasattr(i, "get_data")]
         if not selected:
             return
-            
-        self._push_undo_state()
-        
-        item = selected[0]
-        data = item.get_data()
-        w = data.get("width", 0)
-        
-        canvas_width = scene.sceneRect().width() / MM_TO_PX
-        
-        if alignment == "left":
-            data["x"] = 0
-        elif alignment == "center":
-            data["x"] = (canvas_width - w) / 2
-        elif alignment == "right":
-            data["x"] = canvas_width - w
 
-        # Para texto/compuesto, alinear también el contenido dentro de la caja,
-        # no solo la posición de la caja. Así, al centrar la caja en el lienzo,
-        # el texto queda anclado al mismo eje central y los atributos de distinta
-        # longitud comparten el centro (no se anclan por el borde izquierdo).
+        self._push_undo_state()
+
+        # Se alinea la caja YA GIRADA: lo que el ojo ve pegado al borde. `dx`
+        # es cuánto se corre su esquina al girar, y se descuenta para que el
+        # borde visible quede donde toca.
+        from credencializacion.renderer.rotation import rotated_bounds
+
+        canvas_width = scene.sceneRect().width() / MM_TO_PX
+
+        for item in selected:
+            data = item.get_data()
+            dx, _dy, w, _h = rotated_bounds(
+                data.get("width", 0), data.get("height", 0),
+                (data.get("properties") or {}).get("rotation", 0) or 0,
+            )
+
+            if alignment == "left":
+                data["x"] = -dx
+            elif alignment == "center":
+                data["x"] = (canvas_width - w) / 2 - dx
+            elif alignment == "right":
+                data["x"] = canvas_width - w - dx
+
+            self._aplicar_alineacion_interna(data, alignment)
+            item.set_data(data)
+
+        self._properties_panel.update_properties(
+            selected[0].get_data(), len(selected)
+        )
+
+    @staticmethod
+    def _aplicar_alineacion_interna(data: dict, alignment: str) -> None:
+        """Alinea también el contenido dentro de la caja, para texto.
+
+        Así, al centrar la caja en el lienzo, el texto queda anclado al mismo
+        eje central y los atributos de distinta longitud comparten el centro
+        (no se anclan por el borde izquierdo).
+        """
         if data.get("type") in ("text", "composite"):
             data.setdefault("properties", {})["alignment"] = alignment
-            
-        item.set_data(data)
-        self._properties_panel.update_properties(item.get_data())
 
     def delete_selected(self) -> None:
         """Elimina el elemento seleccionado."""

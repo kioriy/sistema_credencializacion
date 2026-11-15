@@ -37,6 +37,7 @@ from credencializacion.renderer.text_fit import (
 from credencializacion.renderer.rotation import (
     should_rotate,
     apply_rotation,
+    element_rotation,
     restore_rotation,
     get_rotated_dimensions,
 )
@@ -408,6 +409,16 @@ class PDFEngine:
         # PDF tiene Y invertido: convertir de top-down a bottom-up
         y_pdf = card_height_pts - y_pts - h_pts
 
+        # Rotación del elemento: se gira el lienzo alrededor del centro del
+        # elemento y se dibuja igual que sin rotar, así cada tipo de dibujo
+        # (texto, imagen, QR…) queda girado sin tocar su propia lógica. El
+        # signo se invierte porque en el diseñador el ángulo positivo gira en
+        # el sentido de las manecillas y en el PDF al contrario.
+        angulo = element_rotation(elem)
+        if angulo:
+            apply_rotation(canvas, x_pts + w_pts / 2, y_pdf + h_pts / 2, -angulo)
+            canvas.translate(-(x_pts + w_pts / 2), -(y_pdf + h_pts / 2))
+
         if elem_type == "background":
             self._draw_background(canvas, x_pts, y_pdf, w_pts, h_pts, props)
         elif elem_type == "image" or elem_type == "photo_path":
@@ -426,6 +437,9 @@ class PDFEngine:
                 self._draw_barcode(canvas, registro, x_pts, y_pdf, w_pts, h_pts, elem, props)
             else:
                 self._draw_text(canvas, registro, x_pts, y_pdf, w_pts, h_pts, elem, props)
+
+        if angulo:
+            restore_rotation(canvas)
 
     def _draw_background(
         self,

@@ -361,6 +361,42 @@ class MainWindow(QMainWindow):
         tb_ed_layout.addWidget(self.btn_editor_align_left)
         tb_ed_layout.addWidget(self.btn_editor_align_center)
         tb_ed_layout.addWidget(self.btn_editor_align_right)
+
+        # Distribuir: reparte varios elementos entre sí. La multiselección se
+        # hace con Alt + clic sobre el lienzo (suma y quita).
+        self.btn_editor_distribute = self._make_menu_tool_btn(
+            "mdi.distribute-horizontal-center", "Distribuir"
+        )
+        self.btn_editor_distribute.setToolTip(
+            "Reparte los elementos seleccionados entre sí. Selecciona varios "
+            "con Alt + clic (mínimo 3)."
+        )
+        self.menu_distribute = QMenu(self.btn_editor_distribute)
+        self.action_dist_h_centros = self.menu_distribute.addAction(
+            "Horizontal · centros equidistantes"
+        )
+        self.action_dist_h_espacio = self.menu_distribute.addAction(
+            "Horizontal · espaciado igual"
+        )
+        self.menu_distribute.addSeparator()
+        self.action_dist_v_centros = self.menu_distribute.addAction(
+            "Vertical · centros equidistantes"
+        )
+        self.action_dist_v_espacio = self.menu_distribute.addAction(
+            "Vertical · espaciado igual"
+        )
+        self.btn_editor_distribute.setMenu(self.menu_distribute)
+        # El clic directo abre el menú: no hay un reparto "por defecto" que
+        # acertar, y elegir uno al azar movería el diseño sin avisar. Se
+        # conserva MenuButtonPopup (no InstantPopup) porque es el modo que
+        # estiliza `_make_menu_tool_btn`: con InstantPopup, Qt dibuja su
+        # propio indicador fuera del borde del botón.
+        self.btn_editor_distribute.clicked.connect(
+            self.btn_editor_distribute.showMenu
+        )
+        tb_ed_layout.addSpacing(10)
+        tb_ed_layout.addWidget(self.btn_editor_distribute)
+
         tb_ed_layout.addSpacing(10)
         tb_ed_layout.addWidget(self.btn_editor_undo)
         tb_ed_layout.addWidget(self.btn_editor_redo)
@@ -380,6 +416,18 @@ class MainWindow(QMainWindow):
         self.btn_editor_align_left.clicked.connect(lambda: self._template_editor.align_selected("left"))
         self.btn_editor_align_center.clicked.connect(lambda: self._template_editor.align_selected("center"))
         self.btn_editor_align_right.clicked.connect(lambda: self._template_editor.align_selected("right"))
+        self.action_dist_h_centros.triggered.connect(
+            lambda: self._template_editor.distribute_selected("horizontal_centros")
+        )
+        self.action_dist_h_espacio.triggered.connect(
+            lambda: self._template_editor.distribute_selected("horizontal_espacio")
+        )
+        self.action_dist_v_centros.triggered.connect(
+            lambda: self._template_editor.distribute_selected("vertical_centros")
+        )
+        self.action_dist_v_espacio.triggered.connect(
+            lambda: self._template_editor.distribute_selected("vertical_espacio")
+        )
         self.btn_editor_delete.clicked.connect(self._template_editor.delete_selected)
         self.btn_editor_open.clicked.connect(self._template_editor.open_template_dialog)
         self.btn_editor_new.clicked.connect(self._template_editor.new_template)
